@@ -143,10 +143,10 @@ int main(int argc, char *argv[])
             break;
         } else if (!input.empty()) {
             auto result = delivery->send(contentTopicOfInterest, QString::fromStdString(input));
-            if (!result.isErr())
-                qDebug() << "Send result:" << result.value();
+            if (result.success)
+                qDebug() << "Send result:" << result.getString();
             else
-                qDebug() << "Send failed";
+                qDebug() << "Send failed:" << result.getError();
         }
     }
 
