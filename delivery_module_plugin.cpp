@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <semaphore>
 
 #include "api_call_handler.h"
@@ -107,7 +108,22 @@ void DeliveryModulePlugin::event_callback(int callerRet, const char* msg, size_t
             QVariantList eventData;
             eventData << jsonObj["messageHash"].toString();
             eventData << msgObj["contentTopic"].toString();
-            eventData << msgObj["payload"].toString();
+
+            // The waku API returns payload as a JSON byte array (e.g. [106,106,106,106]).
+            // Convert it to a base64 string to match the documented event contract.
+            QJsonValue payloadValue = msgObj["payload"];
+            if (payloadValue.isArray()) {
+                QJsonArray payloadArray = payloadValue.toArray();
+                QByteArray payloadBytes;
+                payloadBytes.reserve(payloadArray.size());
+                for (const QJsonValue& val : payloadArray) {
+                    payloadBytes.append(static_cast<char>(val.toInt()));
+                }
+                eventData << QString::fromLatin1(payloadBytes.toBase64());
+            } else {
+                eventData << payloadValue.toString();
+            }
+
             eventData << QString::number(msgObj["timestamp"].toDouble(), 'f', 0);
             plugin->emitEvent("messageReceived", eventData);
 
