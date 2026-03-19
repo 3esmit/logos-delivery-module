@@ -169,7 +169,7 @@ public:
      *                bytes and base64-encoded before crossing the FFI boundary.
      * @return Success with request id, or error details.
      */
-    Q_INVOKABLE QExpected<QString> send(const QString &contentTopic, const QString &payload) override;
+    Q_INVOKABLE LogosResult send(const QString &contentTopic, const QString &payload) override;
 
     /**
      * @brief Subscribes to the supplied content topic.
