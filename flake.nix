@@ -15,8 +15,9 @@
       externalLibInputs = {
         delivery = inputs.logos-delivery;
       };
-      # Copy liblogosdelivery header from the logos-delivery source tree.
-      # The .so is not needed at compile time — shared libs allow undefined symbols.
+      # TODO: The module builder copies libwaku.h from the flake output instead of
+      # liblogosdelivery.h from the source. This workaround copies the correct header.
+      # Should be fixed in logos-module-builder (e.g. header_path in metadata.json).
       preConfigure = ''
         mkdir -p lib
         for f in $(find /nix/store -maxdepth 5 -name "liblogosdelivery.h" 2>/dev/null); do
