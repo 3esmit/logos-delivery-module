@@ -23,5 +23,15 @@
           cp "$f" lib/ 2>/dev/null || true
         done
       '';
+      # Bundle runtime libraries alongside the plugin.
+      postInstall = ''
+        # Use pkg-config to locate the exact libpq from the build environment
+        LIBPQ_LIBDIR=$(pkg-config --variable=libdir libpq 2>/dev/null || true)
+        if [ -n "$LIBPQ_LIBDIR" ] && [ -d "$LIBPQ_LIBDIR" ]; then
+          for f in "$LIBPQ_LIBDIR"/libpq.*; do
+            [ -f "$f" ] && cp -L "$f" $out/lib/ 2>/dev/null || true
+          done
+        fi
+      '';
     };
 }

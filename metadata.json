@@ -19,6 +19,9 @@
     ],
     "capabilities": [],
     "nix": {
+        "packages": {
+            "runtime": ["postgresql"]
+        },
         "external_libraries": [
             {
                 "name": "delivery",
