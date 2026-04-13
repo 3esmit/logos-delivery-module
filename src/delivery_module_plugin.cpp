@@ -247,7 +247,7 @@ LogosResult DeliveryModulePlugin::createNode(const QString &cfg)
     
     // Set up event callback
     logosdelivery_set_event_callback(deliveryCtx, event_callback, this);
-    return {true, QVariant(true)};
+    return {true, {}};
 }
 
 LogosResult DeliveryModulePlugin::start()
@@ -264,13 +264,12 @@ LogosResult DeliveryModulePlugin::start()
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_start_node, deliveryCtx));
 
-    if (outcome.isErr()) {
-        qWarning() << "DeliveryModulePlugin: Start failed:" << outcome.error();
-        return {false, QVariant(), outcome.error()};
+    if (!outcome.success) {
+        qWarning() << "DeliveryModulePlugin: Start failed:" << outcome.getError();
     }
 
-    qDebug() << "DeliveryModulePlugin: Delivery start completed with success: true";
-    return {true, QVariant(true)};
+    qDebug() << "DeliveryModulePlugin: Delivery start completed with success";
+    return outcome;
 }
 
 LogosResult DeliveryModulePlugin::stop()
@@ -287,13 +286,12 @@ LogosResult DeliveryModulePlugin::stop()
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_stop_node, deliveryCtx));
 
-    if (outcome.isErr()) {
-        qWarning() << "DeliveryModulePlugin: Stop failed:" << outcome.error();
-        return {false, QVariant(), outcome.error()};
+    if (!outcome.success) {
+        qWarning() << "DeliveryModulePlugin: Stop failed:" << outcome.getError();
     }
 
-    qDebug() << "DeliveryModulePlugin: Delivery stop completed with success: true";
-    return {true, QVariant(true)};
+    qDebug() << "DeliveryModulePlugin: Delivery stop completed with success";
+    return outcome;
 }
 LogosResult DeliveryModulePlugin::send(const QString &contentTopic, const QString &payload)
 {
@@ -315,19 +313,18 @@ LogosResult DeliveryModulePlugin::send(const QString &contentTopic, const QStrin
     QJsonDocument doc(messageObj);
     QByteArray messageJson = doc.toJson(QJsonDocument::Compact);
 
-    auto outcome = callApiRetValue<QString>(
+    auto outcome = callApiRetValue(
         "send",
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_send, deliveryCtx, messageJson.constData()));
 
-    if (outcome.isErr()) {
-        qWarning() << "DeliveryModulePlugin: Send failed for topic:" << contentTopic << ", reason:" << outcome.error();
-        return {false, QVariant(), outcome.error()};
+    if (!outcome.success) {
+        qWarning() << "DeliveryModulePlugin: Send failed for topic:" << contentTopic << ", reason:" << outcome.getError();
     }
 
-    const QString responseMessage = outcome.value();
-    qDebug() << "DeliveryModulePlugin: Send initiated for topic:" << contentTopic << ", with success: true";
-    return {true, responseMessage};
+    const QString responseMessage = outcome.getString();
+    qDebug() << "DeliveryModulePlugin: Send initiated for topic:" << contentTopic << ", with success, requestId: " << responseMessage;
+    return outcome;
 }
 
 LogosResult DeliveryModulePlugin::subscribe(const QString &contentTopic)
@@ -347,13 +344,12 @@ LogosResult DeliveryModulePlugin::subscribe(const QString &contentTopic)
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_subscribe, deliveryCtx, topicUtf8.constData()));
 
-    if (outcome.isErr()) {
-        qWarning() << "DeliveryModulePlugin: Subscribe failed for topic:" << contentTopic << ", reason:" << outcome.error();
-        return {false, QVariant(), outcome.error()};
+    if (!outcome.success) {
+        qWarning() << "DeliveryModulePlugin: Subscribe failed for topic:" << contentTopic << ", reason:" << outcome.getError();
     }
 
-    qDebug() << "DeliveryModulePlugin: Subscribe completed for topic:" << contentTopic << " with success: true";
-    return {true, QVariant(true)};
+    qDebug() << "DeliveryModulePlugin: Subscribe completed for topic:" << contentTopic << " with success";
+    return outcome;
 }
 
 LogosResult DeliveryModulePlugin::unsubscribe(const QString &contentTopic)
@@ -373,13 +369,12 @@ LogosResult DeliveryModulePlugin::unsubscribe(const QString &contentTopic)
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_unsubscribe, deliveryCtx, topicUtf8.constData()));
 
-    if (outcome.isErr()) {
-        qWarning() << "DeliveryModulePlugin: Unsubscribe failed for topic:" << contentTopic << ", reason:" << outcome.error();
-        return {false, QVariant(), outcome.error()};
+    if (!outcome.success) {
+        qWarning() << "DeliveryModulePlugin: Unsubscribe failed for topic:" << contentTopic << ", reason:" << outcome.getError();
     }
 
-    qDebug() << "DeliveryModulePlugin: Unsubscribe completed for topic:" << contentTopic << " with success: true";
-    return {true, QVariant(true)};
+    qDebug() << "DeliveryModulePlugin: Unsubscribe completed for topic:" << contentTopic << " with success";
+    return outcome;
 }
 
 QString DeliveryModulePlugin::version() const {
@@ -390,18 +385,18 @@ QString DeliveryModulePlugin::version() const {
     }
 
     auto attributeName = "Version";
-    auto liblogosDeliveryVersion = callApiRetValue<QString>(
+    auto liblogosDeliveryVersion = callApiRetValue(
         "get_node_info",
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_get_node_info, deliveryCtx, attributeName));
 
-    if (liblogosDeliveryVersion.isErr()) {
+    if (!liblogosDeliveryVersion.success) {
         qWarning() << "DeliveryModulePlugin: Get node info failed getting version, reason:" <<
-            liblogosDeliveryVersion.error();
+            liblogosDeliveryVersion.getError();
         return moduleVersion + " (liblogosdelivery version unknown)";
     }
 
-    const QString version = liblogosDeliveryVersion.value();
+    const QString version = liblogosDeliveryVersion.getString();
     qDebug() << "DeliveryModulePlugin: Get node info completed for attribute:" <<
         attributeName << ", with success: " << version;
 
@@ -416,17 +411,15 @@ LogosResult DeliveryModulePlugin::getAvailableNodeInfoIDs() {
         qWarning() << "DeliveryModulePlugin: Cannot get available node info IDs - context not initialized. Call createNode first.";
         return {false, QVariant(), QStringLiteral("Context not initialized")};
     }
-    auto outcome = callApiRetValue<QString>(
+    auto outcome = callApiRetValue(
         "get_available_node_info_ids",
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_get_available_node_info_ids, deliveryCtx));
 
-    if (outcome.isErr()) {
-        qWarning() << "DeliveryModulePlugin: Get available node info IDs failed, reason:" << outcome.error();
-        return {false, QVariant(), outcome.error()};
+    if (!outcome.success) {
+        qWarning() << "DeliveryModulePlugin: Get available node info IDs failed, reason:" << outcome.getError();
     }
-
-    return {true, outcome.value()};
+    return outcome;
 }
 
 LogosResult DeliveryModulePlugin::getNodeInfo(const QString &nodeInfoId) {
@@ -436,18 +429,17 @@ LogosResult DeliveryModulePlugin::getNodeInfo(const QString &nodeInfoId) {
         qWarning() << "DeliveryModulePlugin: Cannot get node info - context not initialized. Call createNode first.";
         return {false, QVariant(), QStringLiteral("Context not initialized")};
     }
-    auto outcome = callApiRetValue<QString>(
+    auto outcome = callApiRetValue(
         "get_node_info",
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_get_node_info, deliveryCtx, nodeInfoId.toUtf8().constData()));
 
-    if (outcome.isErr()) {
+    if (!outcome.success) {
         qWarning() << "DeliveryModulePlugin: Get node info failed for ID:" << nodeInfoId <<
-            ", reason:" << outcome.error();
-        return {false, QVariant(), outcome.error()};
+            ", reason:" << outcome.getError();
     }
 
-    return {true, outcome.value()};
+    return outcome;
 }
 
 LogosResult DeliveryModulePlugin::getAvailableConfigs() {
@@ -457,15 +449,14 @@ LogosResult DeliveryModulePlugin::getAvailableConfigs() {
         qWarning() << "DeliveryModulePlugin: Cannot get available configs - context not initialized. Call createNode first.";
         return {false, QVariant(), QStringLiteral("Context not initialized")};
     }
-    auto outcome = callApiRetValue<QString>(
+    auto outcome = callApiRetValue(
         "get_available_configs",
         CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_get_available_configs, deliveryCtx));
 
-    if (outcome.isErr()) {
-        qWarning() << "DeliveryModulePlugin: Get available configs failed, reason:" << outcome.error();
-        return {false, QVariant(), outcome.error()};
+    if (!outcome.success) {
+        qWarning() << "DeliveryModulePlugin: Get available configs failed, reason:" << outcome.getError();
     }
 
-    return {true, outcome.value()};
+    return outcome;
 }

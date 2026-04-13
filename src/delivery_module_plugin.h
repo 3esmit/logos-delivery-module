@@ -201,7 +201,7 @@ public:
 
     QString name() const override { return "delivery_module"; }
 
-    QString version() const;
+    QString version() const override;
 
     /**
      * @brief Injects/replaces the Logos API bridge used for event forwarding.
