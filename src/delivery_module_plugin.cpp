@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <memory>
 #include <mutex>
+#include <QJsonArray>
 #include <semaphore>
 #include <unordered_map>
 
@@ -103,6 +104,37 @@ void DeliveryModulePlugin::event_callback(int callerRet, const char* msg, size_t
             eventData << jsonObj["messageHash"].toString();
             eventData << timestamp;
             plugin->emitEvent("messagePropagated", eventData);
+            
+        } else if (eventType == "message_received") {
+            // MessageReceivedEvent: messageHash, message (WakuMessage)
+            QJsonObject msgObj = jsonObj["message"].toObject();
+            QVariantList eventData;
+            eventData << jsonObj["messageHash"].toString();
+            eventData << msgObj["contentTopic"].toString();
+
+            // The waku API returns payload as a JSON byte array (e.g. [106,106,106,106]).
+            // Convert it to a base64 string to match the documented event contract.
+            QJsonValue payloadValue = msgObj["payload"];
+            if (payloadValue.isArray()) {
+                QJsonArray payloadArray = payloadValue.toArray();
+                QByteArray payloadBytes;
+                payloadBytes.reserve(payloadArray.size());
+                for (const QJsonValue& val : payloadArray) {
+                    payloadBytes.append(static_cast<char>(val.toInt()));
+                }
+                eventData << QString::fromLatin1(payloadBytes.toBase64());
+            } else {
+                eventData << payloadValue.toString();
+            }
+
+            eventData << QString::number(msgObj["timestamp"].toDouble(), 'f', 0);
+            plugin->emitEvent("messageReceived", eventData);
+
+        } else if (eventType == "connection_status_change") {
+            QVariantList eventData;
+            eventData << jsonObj["connectionStatus"].toString();
+            eventData << timestamp;
+            plugin->emitEvent("connectionStateChanged", eventData);
             
         } else {
             qWarning() << "DeliveryModulePlugin::event_callback: Unknown event type:" << eventType;
@@ -263,26 +295,26 @@ bool DeliveryModulePlugin::stop()
     qDebug() << "DeliveryModulePlugin: Messaging stop completed with success: true";
     return true;
 }
-QExpected<QString> DeliveryModulePlugin::send(const QString &contentTopic, const QString &payload)
+LogosResult DeliveryModulePlugin::send(const QString &contentTopic, const QString &payload)
 {
     qDebug() << "DeliveryModulePlugin::send called with contentTopic:" << contentTopic;
     qDebug() << "DeliveryModulePlugin::send payload:" << payload;
-    
+
     if (!deliveryCtx) {
         qWarning() << "DeliveryModulePlugin: Cannot send message - context not initialized. Call createNode first.";
-        return QExpected<QString>::err("Context not initialized");
+        return {false, QVariant(), QStringLiteral("Context not initialized")};
     }
-    
+
     // Construct JSON message according to logosdelivery_send API
     // The payload should be base64-encoded as per the API spec
     QJsonObject messageObj;
     messageObj["contentTopic"] = contentTopic;
     messageObj["payload"] = QString::fromUtf8(payload.toUtf8().toBase64());
     messageObj["ephemeral"] = false;
-    
+
     QJsonDocument doc(messageObj);
     QByteArray messageJson = doc.toJson(QJsonDocument::Compact);
-    
+
     auto outcome = callApiRetValue<QString>(
         "send",
         CALLBACK_TIMEOUT,
@@ -290,12 +322,12 @@ QExpected<QString> DeliveryModulePlugin::send(const QString &contentTopic, const
 
     if (outcome.isErr()) {
         qWarning() << "DeliveryModulePlugin: Send failed for topic:" << contentTopic << ", reason:" << outcome.error();
-        return QExpected<QString>::err(outcome.error());
+        return {false, QVariant(), outcome.error()};
     }
 
     const QString responseMessage = outcome.value();
     qDebug() << "DeliveryModulePlugin: Send initiated for topic:" << contentTopic << ", with success: true";
-    return QExpected<QString>::ok(responseMessage);
+    return {true, responseMessage};
 }
 
 bool DeliveryModulePlugin::subscribe(const QString &contentTopic)
@@ -348,4 +380,73 @@ bool DeliveryModulePlugin::unsubscribe(const QString &contentTopic)
 
     qDebug() << "DeliveryModulePlugin: Unsubscribe completed for topic:" << contentTopic << " with success: true";
     return true;
+}
+
+QString DeliveryModulePlugin::version() const {
+    QString moduleVersion = "1.0.0";
+    if (!deliveryCtx) {
+        qWarning() << "DeliveryModulePlugin: Cannot subscribe - context not initialized. Call createNode first.";
+        return moduleVersion + " (liblogosdelivery version unknown, context not initialized)";
+    }
+
+    auto attributeName = "Version";
+    auto liblogosDeliveryVersion = callApiRetValue<QString>(
+        "get_node_info",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_get_node_info, deliveryCtx, attributeName));
+
+    if (liblogosDeliveryVersion.isErr()) {
+        qWarning() << "DeliveryModulePlugin: Get node info failed getting version, reason:" <<
+            liblogosDeliveryVersion.error();
+        return moduleVersion + " (liblogosdelivery version unknown)";
+    }
+
+    const QString version = liblogosDeliveryVersion.value();
+    qDebug() << "DeliveryModulePlugin: Get node info completed for attribute:" <<
+        attributeName << ", with success: " << version;
+
+    return moduleVersion + " (liblogosdelivery version: " + version + ")";
+}
+
+QString DeliveryModulePlugin::getAvailableNodeInfoIDs() {
+    auto outcome = callApiRetValue<QString>(
+        "get_available_node_info_ids",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_get_available_node_info_ids, deliveryCtx));
+
+    if (outcome.isErr()) {
+        qWarning() << "DeliveryModulePlugin: Get available node info IDs failed, reason:" << outcome.error();
+        return QString();
+    }
+
+    return outcome.value();
+}
+
+QString DeliveryModulePlugin::getNodeInfo(const QString &nodeInfoId) {
+    auto outcome = callApiRetValue<QString>(
+        "get_node_info",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_get_node_info, deliveryCtx, nodeInfoId.toUtf8().constData()));
+
+    if (outcome.isErr()) {
+        qWarning() << "DeliveryModulePlugin: Get node info failed for ID:" << nodeInfoId <<
+            ", reason:" << outcome.error();
+        return QString();
+    }
+
+    return outcome.value();
+}
+
+QString DeliveryModulePlugin::getAvailableConfigs() {
+    auto outcome = callApiRetValue<QString>(
+        "get_available_configs",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_get_available_configs, deliveryCtx));
+
+    if (outcome.isErr()) {
+        qWarning() << "DeliveryModulePlugin: Get available configs failed, reason:" << outcome.error();
+        return QString();
+    }
+
+    return outcome.value();
 }
