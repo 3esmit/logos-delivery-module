@@ -4,9 +4,9 @@
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <memory>
 #include <mutex>
-#include <QJsonArray>
 #include <semaphore>
 #include <unordered_map>
 
