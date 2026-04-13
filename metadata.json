@@ -1,20 +1,35 @@
 {
-  "name": "delivery_module",
-  "version": "1.0.0",
-  "description": "Logos Delivery Module - High-level message-delivery API",
-  "author": "Logos Core Team",
-  "type": "core",
-  "category": "protocol",
-  "main": "delivery_module_plugin",
-  "dependencies": [],
-  "include": [
-    "liblogosdelivery.so", 
-    "liblogosdelivery.dylib", 
-    "liblogosdelivery.dll",
-    "libpq.so",
-    "libpq.so.5",
-    "libpq.dylib",
-    "libpq.5.dylib",
-    "libpq.dll"],
-  "capabilities": []
+    "name": "delivery_module",
+    "version": "1.0.0",
+    "description": "Logos Delivery Module - High-level message-delivery API",
+    "author": "Logos Core Team",
+    "type": "core",
+    "category": "protocol",
+    "main": "delivery_module_plugin",
+    "dependencies": [],
+    "include": [
+        "liblogosdelivery.so",
+        "liblogosdelivery.dylib",
+        "liblogosdelivery.dll",
+        "libpq.so",
+        "libpq.so.5",
+        "libpq.dylib",
+        "libpq.5.dylib",
+        "libpq.dll"
+    ],
+    "capabilities": [],
+    "nix": {
+        "packages": {
+            "runtime": ["postgresql"]
+        },
+        "external_libraries": [
+            {
+                "name": "delivery",
+                "build_command": "true"
+            }
+        ],
+        "cmake": {
+            "extra_include_dirs": ["lib"]
+        }
+    }
 }
