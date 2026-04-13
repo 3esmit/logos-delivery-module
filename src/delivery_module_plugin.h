@@ -137,19 +137,19 @@ public:
      * @return `true` if context creation succeeds and callback returns `RET_OK`,
      *         otherwise `false`.
      */
-    Q_INVOKABLE bool createNode(const QString &cfg) override;
+    Q_INVOKABLE LogosResult createNode(const QString &cfg) override;
 
     /**
      * @brief Starts the delivery node.
      * @return `true` on success; `false` when no context exists or start fails.
      */
-    Q_INVOKABLE bool start() override;
+    Q_INVOKABLE LogosResult start() override;
 
     /**
      * @brief Stops the delivery node.
      * @return `true` on success; `false` when no context exists or stop fails.
      */
-    Q_INVOKABLE bool stop() override;
+    Q_INVOKABLE LogosResult stop() override;
 
     /**
      * @brief Sends a message over the active node.
@@ -177,22 +177,22 @@ public:
      * @param contentTopic Topic identifier.
      * @return `true` when subscribed successfully, otherwise `false`.
      */
-    Q_INVOKABLE bool subscribe(const QString &contentTopic) override;
+    Q_INVOKABLE LogosResult subscribe(const QString &contentTopic) override;
 
     /**
      * @brief Unsubscribes from the supplied content topic.
      * @param contentTopic Topic identifier.
      * @return `true` when unsubscribed successfully, otherwise `false`.
      */
-    Q_INVOKABLE bool unsubscribe(const QString &contentTopic) override;
-    Q_INVOKABLE QString getAvailableNodeInfoIDs() override;
+    Q_INVOKABLE LogosResult unsubscribe(const QString &contentTopic) override;
+    Q_INVOKABLE LogosResult getAvailableNodeInfoIDs() override;
 
     /**
      * @brief Semantic version of this plugin implementation.
      * @param nodeInfoId Identifier for the requested node info item.
      * @return UTF-16 string containing UTF-8 serializable JSON data, or an empty string on error.
      */
-    Q_INVOKABLE QString getNodeInfo(const QString &nodeInfoId) override;
+    Q_INVOKABLE LogosResult getNodeInfo(const QString &nodeInfoId) override;
 
     /**
      * @brief Information about the available configuration parameters to be used in `createNode`.
