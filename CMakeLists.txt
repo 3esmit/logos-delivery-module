@@ -39,7 +39,6 @@ if(BUILD_TESTING)
         src/delivery_module_plugin.h
         src/delivery_module_interface.h
         src/api_call_handler.h
-        src/QExpected.h
     )
 
     target_include_directories(delivery_module_plugin_integration_test PRIVATE
