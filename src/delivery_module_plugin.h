@@ -197,7 +197,7 @@ public:
     /**
      * @brief Information about the available configuration parameters to be used in `createNode`.
      */
-    Q_INVOKABLE QString getAvailableConfigs() override;
+    Q_INVOKABLE LogosResult getAvailableConfigs() override;
 
     QString name() const override { return "delivery_module"; }
 
