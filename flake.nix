@@ -32,6 +32,11 @@
       '';
       # Bundle runtime libraries alongside the plugin.
       postInstall = ''
+        # liblogosdelivery.dylib is copied to build/modules/ by cmake PRE_LINK.
+        # buildPlugin's installPhase checks lib/ (= build/lib/) which doesn't exist,
+        # so we copy it here explicitly.
+        cp modules/liblogosdelivery.dylib $out/lib/ 2>/dev/null || true
+
         # Use pkg-config to locate the exact libpq from the build environment
         LIBPQ_LIBDIR=$(pkg-config --variable=libdir libpq 2>/dev/null || true)
         if [ -n "$LIBPQ_LIBDIR" ] && [ -d "$LIBPQ_LIBDIR" ]; then
