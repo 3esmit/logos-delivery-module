@@ -7,22 +7,27 @@
     logos-delivery.url = "git+https://github.com/logos-messaging/logos-delivery?submodules=1";
   };
 
-  outputs = inputs@{ logos-module-builder, ... }:
+  outputs = inputs@{ logos-module-builder, nixpkgs, ... }:
     logos-module-builder.lib.mkLogosModule {
       src = ./.;
       configFile = ./metadata.json;
       flakeInputs = inputs;
+      # logos-delivery's default package = libwaku, not liblogosdelivery.
+      # Wrap it so mkLogosModule resolves .default → liblogosdelivery per-system,
+      # which feeds into mkExternalLib and then buildPlugin.externalLibCopies.
       externalLibInputs = {
-        delivery = inputs.logos-delivery;
+        logosdelivery = {
+          packages = nixpkgs.lib.genAttrs
+            [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ]
+            (system: { default = inputs.logos-delivery.packages.${system}.liblogosdelivery; });
+        };
       };
-      # TODO: The module builder copies libwaku.h from the flake output instead of
-      # liblogosdelivery.h from the source. This workaround copies the correct header.
-      # Should be fixed in logos-module-builder (e.g. header_path in metadata.json).
+      # buildPlugin.externalLibCopies copies externalLibs/lib/* → lib/ but not include/*.
+      # The header must land in lib/ for the CMake INCLUDE_DIRS. The liblogosdelivery
+      # derivation is already a build dep (via externalLibs), so its store path is present.
       preConfigure = ''
         mkdir -p lib
-        for f in $(find /nix/store -maxdepth 5 -name "liblogosdelivery.h" 2>/dev/null); do
-          cp "$f" lib/ 2>/dev/null || true
-        done
+        find /nix/store -maxdepth 6 -name "liblogosdelivery.h" 2>/dev/null | head -1 | xargs -I{} cp {} lib/ || true
       '';
       # Bundle runtime libraries alongside the plugin.
       postInstall = ''
