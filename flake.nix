@@ -16,12 +16,7 @@
       # Wrap it so mkLogosModule resolves .default → liblogosdelivery per-system,
       # which feeds into mkExternalLib and then buildPlugin.externalLibCopies.
       externalLibInputs = {
-        logosdelivery = {
-          packages = builtins.listToAttrs (map (system: {
-            name = system;
-            value = { default = inputs.logos-delivery.packages.${system}.liblogosdelivery; };
-          }) [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ]);
-        };
+        logosdelivery = inputs.logos-delivery;
       };
       # buildPlugin.externalLibCopies copies externalLibs/lib/* → lib/ but not include/*.
       # The header must land in lib/ for the CMake INCLUDE_DIRS. The liblogosdelivery
