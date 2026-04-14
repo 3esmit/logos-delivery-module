@@ -26,6 +26,25 @@
           packages.default = "rln";
         };
       };
+      tests = {
+        dir = ./tests;
+        mockCLibs = [ "logosdelivery" ];
+        # liblogosdelivery.dylib has a Cargo-baked absolute path to librln.dylib.
+        # Rewrite it to @rpath/librln.dylib so the dynamic linker can find it via
+        # the lib/ RPATH set on the integration test binary.
+        # TODO: remove once logos-module-builder mkLogosModuleTests.nix handles
+        # transitive dylib dependency rewriting in its preConfigure (similar to
+        # the postInstall rewrite done for the main module build).
+        preConfigure = ''
+          if [ -f lib/liblogosdelivery.dylib ]; then
+            OLD_RLN=$(otool -L lib/liblogosdelivery.dylib | awk '/librln/{print $1}')
+            if [ -n "$OLD_RLN" ]; then
+              install_name_tool -change "$OLD_RLN" "@rpath/librln.dylib" lib/liblogosdelivery.dylib
+            fi
+          fi
+        '';
+      };
+      # Bundle runtime libraries alongside the plugin.
       postInstall = ''
         # liblogosdelivery.dylib has a sandbox-baked absolute path for librln.dylib
         # (Cargo bakes the build-time path as the install name). Rewrite it to
