@@ -25,7 +25,7 @@
         "external_libraries": [
             {
                 "name": "delivery",
-                "build_command": "true"
+                "build_command": "nix build .#liblogosdelivery"
             }
         ],
         "cmake": {
