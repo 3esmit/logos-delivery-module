@@ -24,7 +24,6 @@ The result will include (once liblogosdelivery is available):
 - `/lib/logos/modules/delivery_module_plugin.dylib` (or `.so` on Linux) - The Delivery module plugin
 - Symlink to `liblogosdelivery.dylib` (or `.so` on Linux) from logos-delivery
 - `/share/logos-delivery-module/metadata.json` - Module metadata
-- `/share/logos-delivery-module/generated/` - Generated module files
 
 #### Build Individual Components
 
@@ -34,6 +33,9 @@ nix build '.#lib'
 
 # Build only the generated headers
 nix build '.#include'
+
+# build module in local and in protable logos_core format
+nix build .#lgx / .#lgx-portable
 ```
 
 #### Development Shell
@@ -88,7 +90,7 @@ All dependencies are automatically handled by the Nix flake configuration.
 
 ## Module Interface
 
-The delivery module provides the following API methods (all synchronous):
+The delivery module provides the following API methods (all synchronous, all return LogosResult):
 
 - `createNode(cfg: QString)` - Initialize the delivery node with a JSON configuration (call once)
 - `start()` - Start the delivery node
