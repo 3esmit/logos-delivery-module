@@ -7,7 +7,7 @@
     logos-delivery.url = "git+https://github.com/logos-messaging/logos-delivery?submodules=1";
   };
 
-  outputs = inputs@{ logos-module-builder, nixpkgs, ... }:
+  outputs = inputs@{ logos-module-builder, ... }:
     logos-module-builder.lib.mkLogosModule {
       src = ./.;
       configFile = ./metadata.json;
@@ -17,9 +17,10 @@
       # which feeds into mkExternalLib and then buildPlugin.externalLibCopies.
       externalLibInputs = {
         logosdelivery = {
-          packages = nixpkgs.lib.genAttrs
-            [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ]
-            (system: { default = inputs.logos-delivery.packages.${system}.liblogosdelivery; });
+          packages = builtins.listToAttrs (map (system: {
+            name = system;
+            value = { default = inputs.logos-delivery.packages.${system}.liblogosdelivery; };
+          }) [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ]);
         };
       };
       # buildPlugin.externalLibCopies copies externalLibs/lib/* → lib/ but not include/*.
@@ -27,7 +28,7 @@
       # derivation is already a build dep (via externalLibs), so its store path is present.
       preConfigure = ''
         mkdir -p lib
-        find /nix/store -maxdepth 6 -name "liblogosdelivery.h" 2>/dev/null | head -1 | xargs -I{} cp {} lib/ || true
+        find /nix/store -maxdepth 3 -path "*logos-external*liblogosdelivery.h" 2>/dev/null | head -1 | xargs -I{} cp {} lib/ || true
       '';
       # Bundle runtime libraries alongside the plugin.
       postInstall = ''

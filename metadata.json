@@ -25,7 +25,7 @@
         "external_libraries": [
             {
                 "name": "logosdelivery",
-                "build_command": "cp lib/liblogosdelivery.* . 2>/dev/null; cp include/liblogosdelivery.h . 2>/dev/null; true"
+                "build_command": "cp bin/liblogosdelivery.* . 2>/dev/null || true; cp include/liblogosdelivery.h . 2>/dev/null || true"
             }
         ],
         "cmake": {
