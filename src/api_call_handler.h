@@ -5,11 +5,10 @@
 #include <memory>
 #include <mutex>
 #include <semaphore>
-#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
-#include "QExpected.h"
+#include "logos_types.h"
 
 extern "C" {
 #include <liblogosdelivery.h>
@@ -32,7 +31,7 @@ auto bindApiCall(Func func, void* callbackCtx, BoundArgs&&... boundArgs)
 }
 
 template <typename BoundInvoke>
-QExpected<void> callApiRetVoid(const QString& operationName, std::chrono::seconds timeout, BoundInvoke&& invoke)
+LogosResult callApiRetVoid(const QString& operationName, std::chrono::seconds timeout, BoundInvoke&& invoke)
 {
     struct CallbackContext {
         std::binary_semaphore sem{0};
@@ -73,33 +72,31 @@ QExpected<void> callApiRetVoid(const QString& operationName, std::chrono::second
     if (startResult != RET_OK) {
         std::lock_guard<std::mutex> lock(pendingMutex);
         pendingContexts.erase(callbackKey);
-        return QExpected<void>::err("failed to initiate " + operationName);
+        return {false, {}, "failed to initiate " + operationName};
     }
 
     if (!callbackCtx->sem.try_acquire_for(timeout)) {
         std::lock_guard<std::mutex> lock(pendingMutex);
         pendingContexts.erase(callbackKey);
-        return QExpected<void>::err(operationName + " callback timeout");
+        return {false, {}, operationName + " callback timeout"};
     }
 
     if (callbackCtx->payload.callerRet != RET_OK) {
         const QString message = callbackCtx->payload.message.isEmpty()
             ? operationName + " failed"
             : callbackCtx->payload.message;
-        return QExpected<void>::err(message);
+        return {false, {}, message};
     }
 
-    return QExpected<void>::ok();
+    return {true, {}};
 }
 
-template <typename TResult, typename BoundInvoke>
-QExpected<TResult> callApiRetValue(
+template <typename BoundInvoke>
+LogosResult callApiRetValue(
     const QString& operationName,
     std::chrono::seconds timeout,
     BoundInvoke&& invoke)
 {
-    static_assert(std::is_same_v<TResult, QString>, "callApiRetValue only supports QString payload; perform conversions at call site");
-
     struct CallbackContext {
         std::binary_semaphore sem{0};
         CallbackPayload payload;
@@ -139,22 +136,22 @@ QExpected<TResult> callApiRetValue(
     if (startResult != RET_OK) {
         std::lock_guard<std::mutex> lock(pendingMutex);
         pendingContexts.erase(callbackKey);
-        return QExpected<TResult>::err("failed to initiate " + operationName);
+        return {false, {}, "failed to initiate " + operationName};
     }
 
     if (!callbackCtx->sem.try_acquire_for(timeout)) {
         std::lock_guard<std::mutex> lock(pendingMutex);
         pendingContexts.erase(callbackKey);
-        return QExpected<TResult>::err(operationName + " callback timeout");
+        return {false, {}, operationName + " callback timeout"};
     }
 
     if (callbackCtx->payload.callerRet != RET_OK) {
         const QString message = callbackCtx->payload.message.isEmpty()
             ? operationName + " failed"
             : callbackCtx->payload.message;
-        return QExpected<TResult>::err(message);
+        return {false, {}, message};
     }
 
-    return QExpected<TResult>::ok(callbackCtx->payload.message);
+    return {true, callbackCtx->payload.message};
 }
 } // namespace

@@ -21,7 +21,6 @@ logos_module(
         src/delivery_module_plugin.h
         src/delivery_module_plugin.cpp
         src/api_call_handler.h
-        src/QExpected.h
     EXTERNAL_LIBS
         logosdelivery
     INCLUDE_DIRS
