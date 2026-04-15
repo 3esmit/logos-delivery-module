@@ -5,6 +5,8 @@
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
     logos-delivery.url = "git+https://github.com/logos-messaging/logos-delivery?submodules=1";
+    # Pin to the same zerokit logos-delivery uses so librln.dylib versions match
+    zerokit.follows = "logos-delivery/zerokit";
   };
 
   outputs = inputs@{ logos-module-builder, ... }:
@@ -17,9 +19,26 @@
           input = inputs.logos-delivery;
           packages.default = "liblogosdelivery";
         };
+        # Bundle librln.dylib alongside liblogosdelivery.dylib so the transitive
+        # dep resolves at runtime (and during logos-cpp-generator dlopen).
+        rln = {
+          input = inputs.zerokit;
+          packages.default = "rln";
+        };
       };
-      # Bundle runtime libraries alongside the plugin.
       postInstall = ''
+        # liblogosdelivery.dylib has a sandbox-baked absolute path for librln.dylib
+        # (Cargo bakes the build-time path as the install name). Rewrite it to
+        # @rpath/librln.dylib so the dynamic linker finds it via @loader_path.
+        if [ -f "$out/lib/liblogosdelivery.dylib" ]; then
+          OLD_RLN=$(otool -L "$out/lib/liblogosdelivery.dylib" | awk '/librln/{print $1}')
+          if [ -n "$OLD_RLN" ]; then
+            echo "Fixing librln rpath in liblogosdelivery.dylib: $OLD_RLN -> @rpath/librln.dylib"
+            install_name_tool -change "$OLD_RLN" "@rpath/librln.dylib" \
+              "$out/lib/liblogosdelivery.dylib"
+          fi
+        fi
+
         # Use pkg-config to locate the exact libpq from the build environment
         LIBPQ_LIBDIR=$(pkg-config --variable=libdir libpq 2>/dev/null || true)
         if [ -n "$LIBPQ_LIBDIR" ] && [ -d "$LIBPQ_LIBDIR" ]; then

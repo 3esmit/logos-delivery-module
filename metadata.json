@@ -11,6 +11,9 @@
         "liblogosdelivery.so",
         "liblogosdelivery.dylib",
         "liblogosdelivery.dll",
+        "librln.so",
+        "librln.dylib",
+        "librln.dll",
         "libpq.so",
         "libpq.so.5",
         "libpq.dylib",
@@ -26,6 +29,9 @@
             {
                 "name": "logosdelivery",
                 "build_command": "true"
+            },
+            {
+                "name": "rln"
             }
         ],
         "cmake": {
