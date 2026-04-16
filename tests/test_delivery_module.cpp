@@ -46,6 +46,16 @@ LOGOS_TEST(createNode_tracks_call_count) {
     LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_create_node"), 1);
 }
 
+LOGOS_TEST(createNode_succeeds_with_logos_dev_preset_config) {
+    auto t = LogosTestContext("delivery_module");
+    t.mockCFunction("logosdelivery_create_node").returns(1);
+
+    DeliveryModulePlugin plugin;
+    LOGOS_ASSERT_TRUE(plugin.createNode(R"({"logLevel":"DEBUG","mode":"Core","preset":"logos.dev"})").success);
+    LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_create_node"));
+    LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_set_event_callback"));
+}
+
 // start
 
 LOGOS_TEST(start_fails_without_createNode) {

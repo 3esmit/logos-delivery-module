@@ -70,6 +70,12 @@ LOGOS_TEST(integration_createNode) {
     plugin.stop();
 }
 
+LOGOS_TEST(integration_createNode_with_logos_dev_preset) {
+    DeliveryModulePlugin plugin;
+    LOGOS_ASSERT_TRUE(plugin.createNode(R"({"logLevel":"DEBUG","mode":"Core","preset":"logos.dev"})").success);
+    plugin.stop();
+}
+
 LOGOS_TEST(integration_start_stop) {
     DeliveryModulePlugin plugin;
     LOGOS_ASSERT_TRUE(plugin.createNode(kMinimalConfig).success);
