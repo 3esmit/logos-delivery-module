@@ -37,6 +37,11 @@
             install_name_tool -change "$OLD_RLN" "@rpath/librln.dylib" \
               "$out/lib/liblogosdelivery.dylib"
           fi
+
+          # Add @loader_path/. as an rpath so that Nim's runtime dlopen("libpq.dylib")
+          # finds the bundled libpq in the same directory as liblogosdelivery.dylib.
+          install_name_tool -add_rpath "@loader_path/." \
+            "$out/lib/liblogosdelivery.dylib"
         fi
 
         # Use pkg-config to locate the exact libpq from the build environment
