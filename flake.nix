@@ -63,6 +63,7 @@
         # so setting $ORIGIN makes libpq.so discoverable from the same directory.
         if [ -f "$out/lib/liblogosdelivery.so" ]; then
           echo "Fixing rpath in liblogosdelivery.so: adding \$ORIGIN for dlopen libpq resolution"
+          chmod u+w "$out/lib/liblogosdelivery.so"
           patchelf --set-rpath '$ORIGIN' "$out/lib/liblogosdelivery.so"
         fi
       '';
