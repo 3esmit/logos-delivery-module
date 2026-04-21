@@ -40,8 +40,13 @@
 
           # Add @loader_path/. as an rpath so that Nim's runtime dlopen("libpq.dylib")
           # finds the bundled libpq in the same directory as liblogosdelivery.dylib.
-          install_name_tool -add_rpath "@loader_path/." \
-            "$out/lib/liblogosdelivery.dylib"
+          if ! otool -l "$out/lib/liblogosdelivery.dylib" | awk '
+            $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+            in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+          ' | grep -Fxq "@loader_path/."; then
+            install_name_tool -add_rpath "@loader_path/." \
+              "$out/lib/liblogosdelivery.dylib"
+          fi
         fi
 
         # Use pkg-config to locate the exact libpq from the build environment
