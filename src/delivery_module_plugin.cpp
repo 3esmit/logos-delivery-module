@@ -378,7 +378,7 @@ LogosResult DeliveryModulePlugin::unsubscribe(const QString &contentTopic)
 }
 
 QString DeliveryModulePlugin::version() const {
-    QString moduleVersion = "1.0.0";
+    QString moduleVersion = "1.1.0";
     if (!deliveryCtx) {
         qWarning() << "DeliveryModulePlugin: Cannot subscribe - context not initialized. Call createNode first.";
         return moduleVersion + " (liblogosdelivery version unknown, context not initialized)";
