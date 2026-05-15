@@ -303,11 +303,11 @@ LogosResult DeliveryModulePlugin::send(const QString &contentTopic, const QStrin
         return {false, QVariant(), QStringLiteral("Context not initialized")};
     }
 
-    // Construct JSON message according to logosdelivery_send API
-    // The payload should be base64-encoded as per the API spec
+    // `payload` is forwarded as-is: logosdelivery_send base64-decodes it once
+    // before publishing, so the contract is base64-in / raw-bytes-on-wire.
     QJsonObject messageObj;
     messageObj["contentTopic"] = contentTopic;
-    messageObj["payload"] = QString::fromUtf8(payload.toUtf8().toBase64());
+    messageObj["payload"] = payload;
     messageObj["ephemeral"] = false;
 
     QJsonDocument doc(messageObj);

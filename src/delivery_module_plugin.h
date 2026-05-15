@@ -166,8 +166,8 @@ public:
      * - `messageSent` emitted after the sent message is validated by the network.
      * 
      * @param contentTopic Destination content topic.
-     * @param payload Raw message bytes represented as QString; converted to UTF-8
-     *                bytes and base64-encoded before crossing the FFI boundary.
+     * @param payload      Base64-encoded payload. Forwarded unchanged; the
+     *                     decoded bytes are what end up on the wire.
      * @return Success with request id, or error details.
      */
     Q_INVOKABLE LogosResult send(const QString &contentTopic, const QString &payload) override;
