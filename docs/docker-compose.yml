@@ -1,7 +1,6 @@
 services:
   logos-node:
-    build:
-      context: https://github.com/logos-co/logos-docker.git#460d9ef7d3b72b5266d49304d2f00c7dcc7729d4
+    build: .
     image: logos-node:dev-local
     container_name: logos-node
     volumes:

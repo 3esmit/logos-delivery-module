@@ -107,9 +107,9 @@ To reproduce on amd64 Linux: replace the `build: .` line in [`docker-compose.yml
 
 ### Build natively (works on macOS / Apple silicon)
 
-[`docker-compose.yml`](./docker-compose.yml) uses [`logos-co/logos-docker`](https://github.com/logos-co/logos-docker) as a remote build context — Compose clones the repo and builds the image locally for the host architecture, no `Dockerfile` copy in this directory. The image installs `logoscore` plus `delivery_module`, `storage_module`, and `blockchain_module` via `lgpm`, and exposes `logoscore` on `PATH`.
+[`docker-compose.yml`](./docker-compose.yml) + [`Dockerfile`](./Dockerfile) adapt [`logos-co/logos-docker`](https://github.com/logos-co/logos-docker) to build both `logoscore` and `delivery_module` from source in the same image, instead of installing the prebuilt `delivery_module` release via `lgpd`+`lgpm`. That release was compiled against an older `logos-cpp-sdk` than current `logoscore` HEAD — the `LogosResult` ABI doesn't match, so every `call`'s reply gets serialized as JSON `null` (`status: ok, result: null`) even though the underlying method succeeds. Both `github:logos-co/logos-logoscore-cli` and `github:logos-co/logos-delivery-module` HEAD pin the same `logos-cpp-sdk` revision, so building both fixes the mismatch.
 
-1. Bring it up (first build runs Nix + AppImage extraction; allow ~15–30 min):
+1. Bring it up (first build runs Nix + AppImage extraction; allow ~30–45 min):
 
    ```bash
    docker compose up -d --build
