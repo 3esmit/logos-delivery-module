@@ -1,0 +1,14 @@
+services:
+  logos-node:
+    build:
+      context: https://github.com/logos-co/logos-docker.git#611a7282926724c1cce8119f07fd7a68b5a9bccd
+    image: logos-node:dev-local
+    container_name: logos-node
+    volumes:
+      - ./conf:/conf:ro
+    ports:
+      - "30303:30303/tcp"   # p2p
+      - "9000:9000/udp"     # discv5
+    # The image starts the logoscore daemon (`logoscore -D -m ./modules`).
+    # Loading the module and starting the node is a one-shot step run from
+    # the host after `compose up` — see docs/run-node.md.
