@@ -4,7 +4,7 @@
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
-    logos-delivery.url = "git+https://github.com/logos-messaging/logos-delivery?submodules=1";
+    logos-delivery.url = "git+https://github.com/logos-messaging/logos-delivery?submodules=1&rev=9102ac4c991b60a49801d8503a5b36d5ad4e5f28";
     # Pin to the same zerokit logos-delivery uses so librln.dylib versions match
     zerokit.follows = "logos-delivery/zerokit";
   };
