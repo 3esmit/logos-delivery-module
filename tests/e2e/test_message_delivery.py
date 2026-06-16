@@ -1,0 +1,96 @@
+"""Two-daemon e2e: real message delivery between two delivery nodes peered
+directly via staticnodes (node A's container-routable multiaddr).
+
+Gate = the sender observes `messagePropagated` for its send — the signal proven
+by logos-delivery-interop-tests (relay-only, no store ⇒ no messageSent). The
+receiver-side `messageReceived` assertion is xfail until a green run confirms
+delivery's receive path and the event-payload shape; no reference exercises it.
+See README → "Event payload shape".
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+
+import pytest
+from logos_integration_test_framework import subscribe
+
+from libs.constants import CONTENT_TOPIC
+from libs.helpers import (
+    MODULE,
+    SUBSCRIBE_GRACE_S,
+    call_ok,
+    event_content_topic,
+    event_request_id,
+    parse_event,
+    wait_for_event,
+)
+
+logger = logging.getLogger(__name__)
+
+PROPAGATED_TIMEOUT_S = 40.0
+# Bounded: by the time this (xfail) test runs the mesh is already up, so a working
+# receive is near-instant — no reason to burn the full propagation budget waiting.
+RECEIVED_TIMEOUT_S = 20.0
+
+pytestmark = pytest.mark.two_node
+
+
+def test_two_nodes_propagation(node_a, node_b):
+    """Gate: node A publishes; A observes messagePropagated for its requestId.
+
+    A is the dialee (B dialed it via staticnodes), mirroring interop S06 where the
+    sender is the node the peer connects to.
+    """
+    call_ok(node_a.client, "subscribe", CONTENT_TOPIC)
+    call_ok(node_b.client, "subscribe", CONTENT_TOPIC)
+
+    with subscribe(node_a.client, MODULE, "messagePropagated") as w:
+        time.sleep(SUBSCRIBE_GRACE_S)
+        request_id = call_ok(node_a.client, "send", CONTENT_TOPIC, "hello-propagation")
+        assert request_id, "send returned an empty requestId"
+        event = wait_for_event(w, "messagePropagated", timeout=PROPAGATED_TIMEOUT_S)
+
+    logger.info("messagePropagated payload: %r", parse_event(event))
+    rid = event_request_id(event)
+    if rid is not None:
+        assert rid == request_id, f"messagePropagated requestId {rid!r} != sent {request_id!r}"
+
+
+def test_bidirectional_propagation(node_a, node_b):
+    """Both directions propagate: A→B and B→A."""
+    call_ok(node_a.client, "subscribe", CONTENT_TOPIC)
+    call_ok(node_b.client, "subscribe", CONTENT_TOPIC)
+
+    for sender, content in ((node_a, "a-to-b"), (node_b, "b-to-a")):
+        with subscribe(sender.client, MODULE, "messagePropagated") as w:
+            time.sleep(SUBSCRIBE_GRACE_S)
+            request_id = call_ok(sender.client, "send", CONTENT_TOPIC, content)
+            assert request_id, f"send from {sender.label} returned an empty requestId"
+            event = wait_for_event(w, "messagePropagated", timeout=PROPAGATED_TIMEOUT_S)
+        rid = event_request_id(event)
+        if rid is not None:
+            assert rid == request_id, f"{sender.label}: propagated requestId {rid!r} != sent {request_id!r}"
+
+
+@pytest.mark.xfail(
+    reason="delivery's receive path + messageReceived payload shape are unverified; "
+    "promote to a hard assertion once a green run confirms it",
+    strict=False,
+)
+def test_two_nodes_message_received(node_a, node_b):
+    """Node A subscribes; B publishes; A observes messageReceived for the topic."""
+    call_ok(node_a.client, "subscribe", CONTENT_TOPIC)
+    call_ok(node_b.client, "subscribe", CONTENT_TOPIC)
+
+    with subscribe(node_a.client, MODULE, "messageReceived") as w:
+        time.sleep(SUBSCRIBE_GRACE_S)
+        request_id = call_ok(node_b.client, "send", CONTENT_TOPIC, "hello-receive")
+        assert request_id, "send returned an empty requestId"
+        event = wait_for_event(w, "messageReceived", timeout=RECEIVED_TIMEOUT_S)
+
+    logger.info("messageReceived payload: %r", parse_event(event))
+    topic = event_content_topic(event)
+    if topic is not None:
+        assert topic == CONTENT_TOPIC, f"messageReceived contentTopic {topic!r} != {CONTENT_TOPIC!r}"
