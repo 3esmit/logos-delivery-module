@@ -252,6 +252,70 @@ LOGOS_TEST(getAvailableConfigs_returns_empty_on_ffi_failure) {
     LOGOS_ASSERT_FALSE(result.success);
 }
 
+// collectMetrics
+
+LOGOS_TEST(collectMetrics_returns_empty_without_createNode) {
+    auto t = LogosTestContext("delivery_module");
+    DeliveryModuleImpl impl;
+
+    LogosMap result = impl.collectMetrics();
+    LOGOS_ASSERT(result.contains("metrics"));
+    LOGOS_ASSERT(result["metrics"].is_array());
+    LOGOS_ASSERT(result["metrics"].empty());
+    // No context -> we must not even attempt the FFI read.
+    LOGOS_ASSERT_FALSE(t.cFunctionCalled("logosdelivery_get_node_info"));
+}
+
+LOGOS_TEST(collectMetrics_parses_prometheus_counter_and_gauge) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+
+    const char* promText =
+        "# HELP foo_requests Total requests handled\n"
+        "# TYPE foo_requests counter\n"
+        "foo_requests_total{shard=\"0\"} 42\n"
+        "# HELP bar_peers Connected peers\n"
+        "# TYPE bar_peers gauge\n"
+        "bar_peers 7\n";
+    t.mockCFunction("logosdelivery_get_node_info").returns(promText);
+
+    LogosMap result = impl->collectMetrics();
+    LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_get_node_info"));
+    LOGOS_ASSERT(result.contains("metrics"));
+
+    auto& metrics = result["metrics"];
+    LOGOS_ASSERT(metrics.is_array());
+    LOGOS_ASSERT_EQ(metrics.size(), static_cast<size_t>(2));
+
+    // Counter sample keeps its full series name, family type/help, and labels.
+    LOGOS_ASSERT_EQ(metrics[0]["name"].get<std::string>(), std::string("foo_requests_total"));
+    LOGOS_ASSERT_EQ(metrics[0]["type"].get<std::string>(), std::string("counter"));
+    LOGOS_ASSERT_EQ(metrics[0]["help"].get<std::string>(), std::string("Total requests handled"));
+    LOGOS_ASSERT_EQ(metrics[0]["value"].get<std::string>(), std::string("42"));
+    LOGOS_ASSERT_EQ(metrics[0]["labels"]["shard"].get<std::string>(), std::string("0"));
+
+    // Gauge sample, no labels object emitted.
+    LOGOS_ASSERT_EQ(metrics[1]["name"].get<std::string>(), std::string("bar_peers"));
+    LOGOS_ASSERT_EQ(metrics[1]["type"].get<std::string>(), std::string("gauge"));
+    LOGOS_ASSERT_EQ(metrics[1]["value"].get<std::string>(), std::string("7"));
+    LOGOS_ASSERT_FALSE(metrics[1].contains("labels"));
+
+    delete impl;
+}
+
+LOGOS_TEST(collectMetrics_returns_empty_on_empty_registry) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+
+    t.mockCFunction("logosdelivery_get_node_info").returns("");
+    LogosMap result = impl->collectMetrics();
+
+    LOGOS_ASSERT(result["metrics"].is_array());
+    LOGOS_ASSERT(result["metrics"].empty());
+
+    delete impl;
+}
+
 // module name
 
 LOGOS_TEST(name_returns_delivery_module) {

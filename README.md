@@ -98,6 +98,7 @@ The delivery module provides the following API methods (all synchronous, all ret
 - `getAvailableNodeInfoIDs()` - List queryable node info identifiers
 - `getNodeInfo(nodeInfoId: QString)` - Retrieve node info by identifier
 - `getAvailableConfigs()` - Retrieve available configuration parameter descriptions
+- `collectMetrics()` - Node metrics in the openmetrics `collectMetrics()` convention (see [Metrics](#metrics))
 
 ### Node Configuration (`createNode`)
 
@@ -196,6 +197,35 @@ carries a `QVariantList data` with positional values:
 - **`connectionStateChanged`** – node connectivity change
   - `data[0]` (`QString`): connection status
   - `data[1]` (`QString`): local timestamp (ISO-8601)
+
+### Metrics
+
+The node already aggregates Prometheus metrics internally (the same set exposed
+on `metricsServerPort`). `collectMetrics()` makes them scrapeable through the
+[`openmetrics`](https://github.com/logos-co/openmetrics-module) module without
+standing up a separate HTTP server: it reads the node's `"Metrics"` node-info
+attribute (Prometheus exposition text) and reshapes it into the openmetrics
+`collectMetrics()` convention:
+
+```json
+{
+  "metrics": [
+    { "name": "...", "type": "counter|gauge|histogram|summary", "help": "...", "value": 42, "labels": { "...": "..." } }
+  ]
+}
+```
+
+Implementing `collectMetrics()` (by convention — no registration needed) is all
+that is required to satisfy the openmetrics `metrics_source` interface. Point the
+`openmetrics` module at this one by name to scrape it:
+
+```bash
+logoscore --config-dir /tmp/om call openmetrics start '{"port":9090,"modules":["delivery_module"]}'
+curl http://localhost:9090/metrics   # every series carries module="delivery_module"
+```
+
+Before a node is created (or if the read fails) `collectMetrics()` returns an
+empty `{"metrics": []}` so a scrape never errors out on this module.
 
 ## Architecture
 

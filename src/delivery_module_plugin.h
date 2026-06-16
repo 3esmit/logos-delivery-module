@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include <logos_json.h>
 #include <logos_module_context.h>
 #include <logos_result.h>
 
@@ -164,6 +165,30 @@ public:
      * @brief Information about the available configuration parameters for `createNode`.
      */
     StdLogosResult getAvailableConfigs();
+
+    /**
+     * @brief Returns the node's metrics in the openmetrics `collectMetrics()`
+     *        convention so the `openmetrics` module can scrape this module.
+     *
+     * liblogosdelivery already aggregates Prometheus metrics in its global
+     * registry; the `"Metrics"` node-info attribute renders them as Prometheus
+     * exposition text. This method pulls that text and reshapes it into the
+     * structure the openmetrics scraper expects:
+     * @code{.json}
+     * { "metrics": [ { "name": ..., "type": ..., "help": ..., "value": ..., "labels": {...} } ] }
+     * @endcode
+     *
+     * Implementing this method (by convention, no registration needed) is what
+     * makes the module satisfy the openmetrics `metrics_source` interface; the
+     * scraper appends a `module="delivery_module"` label to every series.
+     *
+     * Always returns a well-formed `{"metrics": [...]}` map. When no node has
+     * been created yet, or the underlying read fails, the array is empty so a
+     * scrape never errors out on this module.
+     *
+     * @return LogosMap (JSON object) with a `metrics` array.
+     */
+    LogosMap collectMetrics();
 
     std::string name() const { return "delivery_module"; }
 
