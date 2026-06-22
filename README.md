@@ -2,7 +2,7 @@
 
 Wrap LogosMessaging API (liblogosdelivery) and make it available as a Logos Core module.
 
-This module provides high-level message delivery capabilities through the liblogosdelivery interface from [logos-delivery](https://github.com/logos-messaging/logos-delivery), packaged as a Logos module plugin compatible with logos-core.
+This module provides high-level message delivery capabilities through the liblogosdelivery interface from [logos-delivery](https://github.com/logos-messaging/logos-delivery), packaged as a Logos module plugin compatible with logos-core (build-reproducibility probe).
 
 Full API documentation is in [`src/delivery_module_plugin.h`](src/delivery_module_plugin.h) (`DeliveryModulePlugin`).
 
