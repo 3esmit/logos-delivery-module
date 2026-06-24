@@ -48,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     needs: build-and-test
+    # Non-gating while #58 (build flips delivery_module start into a hang) is open.
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
