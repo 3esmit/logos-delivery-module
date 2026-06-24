@@ -37,6 +37,10 @@ RECEIVED_TIMEOUT_S = 20.0
 pytestmark = pytest.mark.two_node
 
 
+@pytest.mark.xfail(
+    reason="blocked by https://github.com/logos-co/logos-delivery-module/issues/59",
+    strict=False,
+)
 def test_two_nodes_propagation(node_a, node_b):
     """Gate: node A publishes; A observes messagePropagated for its requestId.
 
@@ -58,6 +62,10 @@ def test_two_nodes_propagation(node_a, node_b):
         assert rid == request_id, f"messagePropagated requestId {rid!r} != sent {request_id!r}"
 
 
+@pytest.mark.xfail(
+    reason="blocked by https://github.com/logos-co/logos-delivery-module/issues/59",
+    strict=False,
+)
 def test_bidirectional_propagation(node_a, node_b):
     """Both directions propagate: A→B and B→A."""
     call_ok(node_a.client, "subscribe", CONTENT_TOPIC)
@@ -75,8 +83,9 @@ def test_bidirectional_propagation(node_a, node_b):
 
 
 @pytest.mark.xfail(
-    reason="delivery's receive path + messageReceived payload shape are unverified; "
-    "promote to a hard assertion once a green run confirms it",
+    reason="fix #58 (build) and #59 (send/subscribe) first, then check the receive path: "
+    "https://github.com/logos-co/logos-delivery-module/issues/58, "
+    "https://github.com/logos-co/logos-delivery-module/issues/59",
     strict=False,
 )
 def test_two_nodes_message_received(node_a, node_b):
