@@ -28,9 +28,6 @@ import pytest
 from libs.constants import NETWORK_SUBNET
 from libs.helpers import DeliveryNode, make_delivery_config, node_multiaddr, setup_delivery_node
 
-# Diagnostic probes are opt-in (E2E_PROBES=1) — kept out of the default suite.
-collect_ignore = [] if os.environ.get("E2E_PROBES") else ["probes"]
-
 # Seconds to let the gossipsub mesh form after the second node dials the first,
 # before the tests publish. Mirrors interop's MESH_STABILIZATION_S.
 MESH_STABILIZATION_S = 12.0
