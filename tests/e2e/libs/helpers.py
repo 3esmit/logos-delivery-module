@@ -22,12 +22,8 @@ logger = logging.getLogger(__name__)
 
 MODULE = "delivery_module"
 
-# Grace before triggering, so the `logoscore watch` subprocess behind the
-# framework's subscribe() is live — events fired in that window are otherwise lost.
 SUBSCRIBE_GRACE_S = 0.5
 
-
-# ── Config ────────────────────────────────────────────────────────────────────
 
 def make_delivery_config(*, tcp_port: int = NODE_TCP_PORT, static_peers: Optional[list[str]] = None) -> str:
     """JSON config for `createNode` — relay-only, single-shard, discovery-off,
@@ -51,8 +47,6 @@ def make_delivery_config(*, tcp_port: int = NODE_TCP_PORT, static_peers: Optiona
     return json.dumps(cfg)
 
 
-# ── Synchronous calls (StdLogosResult) ─────────────────────────────────────────
-
 def call_result(client, method: str, *args: Any, timeout: Optional[float] = None) -> dict:
     """Call a delivery method and return its StdLogosResult dict. No assertion."""
     result = client.call(MODULE, method, *args, timeout=timeout)
@@ -68,8 +62,6 @@ def call_ok(client, method: str, *args: Any, timeout: Optional[float] = None) ->
         raise AssertionError(f"{method}({args!r}) failed: {result.get('error')!r}")
     return result.get("value")
 
-
-# ── Node setup ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class DeliveryNode:
@@ -129,8 +121,6 @@ def _container_ip(daemon) -> str:
         )
     return ip
 
-
-# ── Events ─────────────────────────────────────────────────────────────────────
 
 def wait_for_event(waiter, event_name: str, *, timeout: float, predicate=None):
     """Return the next event named `event_name` (subscribe() doesn't filter by

@@ -30,8 +30,6 @@ from libs.helpers import (
 logger = logging.getLogger(__name__)
 
 PROPAGATED_TIMEOUT_S = 40.0
-# Bounded: by the time this (xfail) test runs the mesh is already up, so a working
-# receive is near-instant — no reason to burn the full propagation budget waiting.
 RECEIVED_TIMEOUT_S = 20.0
 
 pytestmark = pytest.mark.two_node

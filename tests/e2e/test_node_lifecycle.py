@@ -40,15 +40,12 @@ def test_query_and_subscribe_methods(solo_daemon):
     assert call_ok(client, "getAvailableConfigs"), "getAvailableConfigs returned empty"
     assert call_ok(client, "getAvailableNodeInfoIDs"), "getAvailableNodeInfoIDs returned empty"
 
-    # Each advertised id resolves; value may legitimately be empty for an
-    # unconfigured feature, so only require the lookup to succeed.
     for info_id in ("Version", "MyPeerId", "MyMultiaddresses"):
         call_ok(client, "getNodeInfo", info_id)
 
     call_ok(client, "subscribe", CONTENT_TOPIC)
     call_ok(client, "unsubscribe", CONTENT_TOPIC)
 
-    # version() returns a plain string, not a StdLogosResult.
     version = client.call(MODULE, "version")
     if isinstance(version, dict):
         version = version.get("value", "")

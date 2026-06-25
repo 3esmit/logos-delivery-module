@@ -28,8 +28,6 @@ import pytest
 from libs.constants import NETWORK_SUBNET
 from libs.helpers import DeliveryNode, make_delivery_config, node_multiaddr, setup_delivery_node
 
-# Seconds to let the gossipsub mesh form after the second node dials the first,
-# before the tests publish. Mirrors interop's MESH_STABILIZATION_S.
 MESH_STABILIZATION_S = 12.0
 
 
@@ -80,8 +78,6 @@ def shared_docker_network(_e2e_env_or_skip: tuple[str, Path]) -> Iterator[str]:
         capture_output=True, text=True,
     )
     if r.returncode != 0:
-        # Fail loud rather than skip — a runner that can't create a network
-        # silently passing would mask a real environment break.
         pytest.fail(f"failed to create docker network {name!r}: {r.stderr.strip()}")
     try:
         yield name
@@ -98,9 +94,7 @@ def _new_daemon(image: str, modules_dir: Path, network: str, label: str):
         modules_dir=modules_dir,
         container_name=container_name,
         network=network,
-        startup_timeout=60.0,  # cold-start logoscore + plugin load can take 30s+
-        # `--verbose` forwards the SDK's RPC trace to the daemon's stderr (else
-        # docker logs only carry the plugin's own fprintf lines).
+        startup_timeout=60.0,
         extra_args=["--verbose"],
     )
     return daemon, container_name
@@ -116,7 +110,7 @@ def solo_daemon(_e2e_env_or_skip: tuple[str, Path], shared_docker_network: str) 
         daemon.start()
         yield daemon
     finally:
-        _save_logs(container_name)  # before stop() — stop() does `docker rm -f`
+        _save_logs(container_name)
         daemon.stop()
 
 
@@ -134,7 +128,7 @@ def delivery_node_factory(
         def _create(label: str, config_json: str) -> DeliveryNode:
             daemon, container_name = _new_daemon(image, modules_dir, shared_docker_network, label)
             stack.enter_context(daemon)
-            stack.callback(_save_logs, container_name)  # LIFO: logs before teardown
+            stack.callback(_save_logs, container_name)
             return setup_delivery_node(daemon, config_json, label)
 
         yield _create
@@ -152,6 +146,5 @@ def node_b(
 ) -> DeliveryNode:
     peer = node_multiaddr(node_a)
     node = delivery_node_factory("B", make_delivery_config(static_peers=[peer]))
-    # B has dialled A; give the relay mesh time to form before tests publish.
     time.sleep(MESH_STABILIZATION_S)
     return node
