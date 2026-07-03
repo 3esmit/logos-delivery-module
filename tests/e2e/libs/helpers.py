@@ -13,8 +13,9 @@ import json
 import logging
 import re
 import subprocess
-from dataclasses import dataclass
 from typing import Any, Optional
+
+from logos_integration_test_framework import subscribe as _watch_events
 
 from libs.constants import CLUSTER_ID, NODE_TCP_PORT, NUM_SHARDS_IN_NETWORK
 
@@ -25,7 +26,7 @@ MODULE = "delivery_module"
 SUBSCRIBE_GRACE_S = 0.5
 
 
-def make_delivery_config(*, tcp_port: int = NODE_TCP_PORT, static_peers: Optional[list[str]] = None) -> str:
+def make_delivery_config(*, tcp_port: int = NODE_TCP_PORT, static_peers: Optional[list] = None) -> str:
     """JSON config for `createNode` — relay-only, single-shard, discovery-off,
     matching the two-node relay setup proven by logos-delivery-interop-tests."""
     cfg: dict[str, Any] = {
@@ -63,11 +64,58 @@ def call_ok(client, method: str, *args: Any, timeout: Optional[float] = None) ->
     return result.get("value")
 
 
-@dataclass
-class DeliveryNode:
-    client: Any
-    daemon: Any
-    label: str
+class LogosDelivery:
+    """RPC-facing interface to delivery_module on one logoscore client."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def load(self):
+        return self.client.load_module(MODULE)
+
+    def create_node(self, config_json: str, *, timeout: Optional[float] = 90.0):
+        return call_ok(self.client, "createNode", config_json, timeout=timeout)
+
+    def create_node_result(self, config_json: str, *, timeout: Optional[float] = 90.0) -> dict:
+        return call_result(self.client, "createNode", config_json, timeout=timeout)
+
+    def start(self, *, timeout: Optional[float] = 90.0):
+        return call_ok(self.client, "start", timeout=timeout)
+
+    def stop(self, *, timeout: Optional[float] = 90.0):
+        return call_ok(self.client, "stop", timeout=timeout)
+
+    def subscribe(self, content_topic: str, *, timeout: Optional[float] = None):
+        return call_ok(self.client, "subscribe", content_topic, timeout=timeout)
+
+    def unsubscribe(self, content_topic: str, *, timeout: Optional[float] = None):
+        return call_ok(self.client, "unsubscribe", content_topic, timeout=timeout)
+
+    def send(self, content_topic: str, payload: str, *, timeout: Optional[float] = None):
+        return call_ok(self.client, "send", content_topic, payload, timeout=timeout)
+
+    def get_available_configs(self, *, timeout: Optional[float] = None):
+        return call_ok(self.client, "getAvailableConfigs", timeout=timeout)
+
+    def get_available_node_info_ids(self, *, timeout: Optional[float] = None):
+        return call_ok(self.client, "getAvailableNodeInfoIDs", timeout=timeout)
+
+    def get_node_info(self, info_id: str, *, timeout: Optional[float] = None):
+        return call_ok(self.client, "getNodeInfo", info_id, timeout=timeout)
+
+    def version(self, *, timeout: Optional[float] = None):
+        result = self.client.call(MODULE, "version", timeout=timeout)
+        return result.get("value", "") if isinstance(result, dict) else result
+
+    def watch(self, event_name: str):
+        return _watch_events(self.client, MODULE, event_name)
+
+
+class DeliveryNode(LogosDelivery):
+    def __init__(self, client, daemon, label: str):
+        super().__init__(client)
+        self.daemon = daemon
+        self.label = label
 
 
 def setup_delivery_node(daemon, config_json: str, label: str) -> DeliveryNode:
@@ -76,11 +124,11 @@ def setup_delivery_node(daemon, config_json: str, label: str) -> DeliveryNode:
     createNode/start get a generous timeout: cold-starting liblogosdelivery can
     take tens of seconds, and the module itself waits up to 30s on the FFI callback.
     """
-    client = daemon.client()
-    client.load_module(MODULE)
-    call_ok(client, "createNode", config_json, timeout=90.0)
-    call_ok(client, "start", timeout=90.0)
-    return DeliveryNode(client=client, daemon=daemon, label=label)
+    node = DeliveryNode(daemon.client(), daemon, label)
+    node.load()
+    node.create_node(config_json)
+    node.start()
+    return node
 
 
 def node_multiaddr(node: DeliveryNode) -> str:
@@ -90,7 +138,7 @@ def node_multiaddr(node: DeliveryNode) -> str:
     peer can't dial; rewrite the /ip4/ segment to the container's address on the
     shared docker network so the peer reaches it container-to-container.
     """
-    raw = call_ok(node.client, "getNodeInfo", "MyMultiaddresses")
+    raw = node.get_node_info("MyMultiaddresses")
     addr = _first_multiaddr(raw)
     ip = _container_ip(node.daemon)
     routable = re.sub(r"/ip4/[^/]+/", f"/ip4/{ip}/", addr, count=1)

@@ -14,13 +14,10 @@ import logging
 import time
 
 import pytest
-from logos_integration_test_framework import subscribe
 
 from libs.constants import CONTENT_TOPIC
 from libs.helpers import (
-    MODULE,
     SUBSCRIBE_GRACE_S,
-    call_ok,
     event_content_topic,
     event_request_id,
     parse_event,
@@ -45,12 +42,11 @@ def test_two_nodes_propagation(node_a, node_b):
     A is the dialee (B dialed it via staticnodes), mirroring interop S06 where the
     sender is the node the peer connects to.
     """
-    call_ok(node_a.client, "subscribe", CONTENT_TOPIC)
-    call_ok(node_b.client, "subscribe", CONTENT_TOPIC)
+    node_b.subscribe(CONTENT_TOPIC)
 
-    with subscribe(node_a.client, MODULE, "messagePropagated") as w:
+    with node_a.watch("messagePropagated") as w:
         time.sleep(SUBSCRIBE_GRACE_S)
-        request_id = call_ok(node_a.client, "send", CONTENT_TOPIC, "hello-propagation")
+        request_id = node_a.send(CONTENT_TOPIC, "hello-propagation")
         assert request_id, "send returned an empty requestId"
         event = wait_for_event(w, "messagePropagated", timeout=PROPAGATED_TIMEOUT_S)
 
@@ -66,13 +62,13 @@ def test_two_nodes_propagation(node_a, node_b):
 )
 def test_bidirectional_propagation(node_a, node_b):
     """Both directions propagate: A→B and B→A."""
-    call_ok(node_a.client, "subscribe", CONTENT_TOPIC)
-    call_ok(node_b.client, "subscribe", CONTENT_TOPIC)
+    node_a.subscribe(CONTENT_TOPIC)
+    node_b.subscribe(CONTENT_TOPIC)
 
     for sender, content in ((node_a, "a-to-b"), (node_b, "b-to-a")):
-        with subscribe(sender.client, MODULE, "messagePropagated") as w:
+        with sender.watch("messagePropagated") as w:
             time.sleep(SUBSCRIBE_GRACE_S)
-            request_id = call_ok(sender.client, "send", CONTENT_TOPIC, content)
+            request_id = sender.send(CONTENT_TOPIC, content)
             assert request_id, f"send from {sender.label} returned an empty requestId"
             event = wait_for_event(w, "messagePropagated", timeout=PROPAGATED_TIMEOUT_S)
         rid = event_request_id(event)
@@ -88,12 +84,12 @@ def test_bidirectional_propagation(node_a, node_b):
 )
 def test_two_nodes_message_received(node_a, node_b):
     """Node A subscribes; B publishes; A observes messageReceived for the topic."""
-    call_ok(node_a.client, "subscribe", CONTENT_TOPIC)
-    call_ok(node_b.client, "subscribe", CONTENT_TOPIC)
+    node_a.subscribe(CONTENT_TOPIC)
+    node_b.subscribe(CONTENT_TOPIC)
 
-    with subscribe(node_a.client, MODULE, "messageReceived") as w:
+    with node_a.watch("messageReceived") as w:
         time.sleep(SUBSCRIBE_GRACE_S)
-        request_id = call_ok(node_b.client, "send", CONTENT_TOPIC, "hello-receive")
+        request_id = node_b.send(CONTENT_TOPIC, "hello-receive")
         assert request_id, "send returned an empty requestId"
         event = wait_for_event(w, "messageReceived", timeout=RECEIVED_TIMEOUT_S)
 

@@ -8,23 +8,23 @@ don't exercise. Each uses a fresh daemon (createNode is once-per-context).
 from __future__ import annotations
 
 from libs.constants import CONTENT_TOPIC
-from libs.helpers import MODULE, call_ok, call_result, make_delivery_config
+from libs.helpers import LogosDelivery, make_delivery_config
 
 
 def test_module_loads_and_lifecycle(solo_daemon):
-    client = solo_daemon.client()
-    client.load_module(MODULE)
-    call_ok(client, "createNode", make_delivery_config(), timeout=90.0)
-    call_ok(client, "start", timeout=90.0)
-    call_ok(client, "stop", timeout=90.0)
+    delivery = LogosDelivery(solo_daemon.client())
+    delivery.load()
+    delivery.create_node(make_delivery_config())
+    delivery.start()
+    delivery.stop()
 
 
 def test_createNode_twice_rejected(solo_daemon):
-    client = solo_daemon.client()
-    client.load_module(MODULE)
-    call_ok(client, "createNode", make_delivery_config(), timeout=90.0)
+    delivery = LogosDelivery(solo_daemon.client())
+    delivery.load()
+    delivery.create_node(make_delivery_config())
 
-    second = call_result(client, "createNode", make_delivery_config(), timeout=90.0)
+    second = delivery.create_node_result(make_delivery_config())
     assert second.get("success") is False, f"expected the second createNode to be rejected, got {second!r}"
     assert second.get("error"), "rejection carried no error message"
 
@@ -32,21 +32,19 @@ def test_createNode_twice_rejected(solo_daemon):
 def test_query_and_subscribe_methods(solo_daemon):
     """Every post-start RPC method round-trips: the queries, plus subscribe +
     unsubscribe (the only public methods otherwise unexercised e2e)."""
-    client = solo_daemon.client()
-    client.load_module(MODULE)
-    call_ok(client, "createNode", make_delivery_config(), timeout=90.0)
-    call_ok(client, "start", timeout=90.0)
+    delivery = LogosDelivery(solo_daemon.client())
+    delivery.load()
+    delivery.create_node(make_delivery_config())
+    delivery.start()
 
-    assert call_ok(client, "getAvailableConfigs"), "getAvailableConfigs returned empty"
-    assert call_ok(client, "getAvailableNodeInfoIDs"), "getAvailableNodeInfoIDs returned empty"
+    assert delivery.get_available_configs(), "getAvailableConfigs returned empty"
+    assert delivery.get_available_node_info_ids(), "getAvailableNodeInfoIDs returned empty"
 
     for info_id in ("Version", "MyPeerId", "MyMultiaddresses"):
-        call_ok(client, "getNodeInfo", info_id)
+        delivery.get_node_info(info_id)
 
-    call_ok(client, "subscribe", CONTENT_TOPIC)
-    call_ok(client, "unsubscribe", CONTENT_TOPIC)
+    delivery.subscribe(CONTENT_TOPIC)
+    delivery.unsubscribe(CONTENT_TOPIC)
 
-    version = client.call(MODULE, "version")
-    if isinstance(version, dict):
-        version = version.get("value", "")
+    version = delivery.version()
     assert isinstance(version, str) and version, f"unexpected version: {version!r}"
