@@ -1,0 +1,134 @@
+"""Solo-daemon #58 probe: if start() wedges within WEDGE_WAIT_S, attach gdb to every
+process in the container and dump thread backtraces to WEDGE_OUT_DIR. Exits 0."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+
+from logoscore import LogoscoreDockerDaemon
+
+MODULE = "delivery_module"
+CONFIG = json.dumps({
+    "logLevel": "DEBUG", "listenAddress": "0.0.0.0", "tcpPort": 60000,
+    "clusterId": "198", "numShardsInNetwork": 1,
+    "relay": True, "store": False, "filter": False, "lightpush": False,
+    "peerExchange": False, "discv5Discovery": False, "reliabilityEnabled": True,
+})
+
+IMAGE = os.environ.get("LOGOSCORE_IMAGE", "logoscore:smoke-portable")
+MODULES_DIR = os.environ.get("LOGOS_MODULES_DIR", "result/modules")
+CLI = os.environ.get("LOGOSCORE_CLI", "logoscore")
+OUT_DIR = os.environ.get("WEDGE_OUT_DIR", "wedge-diagnostics")
+WAIT_S = int(os.environ.get("WEDGE_WAIT_S", "25"))
+WANT_CORE = os.environ.get("WEDGE_CORE") == "1"
+GDB_DEADLINE = "240"
+
+
+def run(*a: str) -> subprocess.CompletedProcess:
+    return subprocess.run(a, capture_output=True, text=True)
+
+
+def write(name: str, text: str) -> None:
+    with open(os.path.join(OUT_DIR, name), "w") as f:
+        f.write(text)
+
+
+def container_pids(cname: str) -> list[tuple[str, str]]:
+    lines = run("docker", "top", cname, "-eo", "pid,comm").stdout.strip().splitlines()
+    pids = []
+    for line in lines[1:]:
+        parts = line.split(None, 1)
+        if parts and parts[0].isdigit():
+            pids.append((parts[0], parts[1] if len(parts) > 1 else "?"))
+    return pids
+
+
+def gdb_one(pid: str, comm: str) -> str:
+    exprs = [
+        "set pagination off",
+        f"set sysroot /proc/{pid}/root",
+        "info sharedlibrary",
+        "info threads",
+        "thread apply all bt",
+    ]
+    if WANT_CORE:
+        exprs.append(f"generate-core-file {os.path.join(OUT_DIR, 'core.' + pid)}")
+    cmd = ["sudo", "timeout", "-s", "KILL", GDB_DEADLINE, "gdb", "-p", pid, "-batch"]
+    for e in exprs:
+        cmd += ["-ex", e]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    body = f"===== pid {pid} ({comm}) =====\n{r.stdout}"
+    if r.stderr:
+        body += "\n--- gdb stderr ---\n" + r.stderr
+    return body
+
+
+def dump_wedge(cname: str) -> int:
+    pids = container_pids(cname)
+    bts, maps, kstacks = [], [], []
+    for pid, comm in pids:
+        bts.append(gdb_one(pid, comm))
+        maps.append(f"===== pid {pid} ({comm}) =====\n" + run("sudo", "cat", f"/proc/{pid}/maps").stdout)
+        kstacks.append(run("sudo", "sh", "-c",
+                           f"for t in /proc/{pid}/task/*; do echo \"== $t ==\"; cat $t/stack 2>/dev/null; done").stdout)
+    write("start_backtraces.txt", "\n\n".join(bts))
+    write("proc_maps.txt", "\n\n".join(maps))
+    write("kernel_stacks.txt", "\n\n".join(kstacks))
+    return len(pids)
+
+
+def main() -> int:
+    os.makedirs(OUT_DIR, exist_ok=True)
+    summary = [f"image={IMAGE}", f"modules_dir={MODULES_DIR}", f"wait_s={WAIT_S}"]
+
+    with LogoscoreDockerDaemon(image=IMAGE, modules_dir=MODULES_DIR) as daemon:
+        client = daemon.client(binary=CLI)
+        client.load_module(MODULE)
+        summary.append(f"createNode: {client.call(MODULE, 'createNode', CONFIG, timeout=90)}")
+
+        cname = daemon.container_name
+        summary.append(f"container={cname}")
+        summary.append("procs: " + ", ".join(f"{p}:{c}" for p, c in container_pids(cname)))
+
+        start_out: dict = {}
+
+        def do_start() -> None:
+            try:
+                start_out["r"] = client.call(MODULE, "start", timeout=120)
+            except Exception as e:
+                start_out["e"] = repr(e)
+
+        threading.Thread(target=do_start, daemon=True).start()
+        time.sleep(WAIT_S)
+
+        wedged = not start_out
+        summary.append(f"WEDGED={wedged} start_out={start_out or 'NONE (start never returned)'}")
+
+        if wedged:
+            try:
+                n = dump_wedge(cname)
+                summary.append(f"gdb backtraces captured for {n} container procs")
+            except Exception as e:
+                summary.append(f"gdb dump failed: {e!r}")
+        else:
+            summary.append("start returned cleanly (good build) — gdb skipped")
+
+        logs = run("docker", "logs", cname)
+        write("daemon.log", logs.stdout + logs.stderr)
+
+    write("summary.txt", "\n".join(summary) + "\n")
+    print("\n".join(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:
+        print(f"wedge_gdb diagnostic error: {e!r}")
+        sys.exit(0)
