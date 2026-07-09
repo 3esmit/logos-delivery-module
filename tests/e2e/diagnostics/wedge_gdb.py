@@ -1,5 +1,6 @@
-"""Solo-daemon #58 probe: if start() wedges within WEDGE_WAIT_S, attach gdb to every
-process in the container and dump thread backtraces to WEDGE_OUT_DIR. Exits 0."""
+"""Solo-daemon #58 probe: any start() outcome other than success within WEDGE_WAIT_S
+is a wedge (the client RPC errors ~20s before the daemon's 30s semaphore releases), so
+attach gdb to every container process and dump backtraces to WEDGE_OUT_DIR. Exits 0."""
 
 from __future__ import annotations
 
@@ -24,9 +25,9 @@ IMAGE = os.environ.get("LOGOSCORE_IMAGE", "logoscore:smoke-portable")
 MODULES_DIR = os.environ.get("LOGOS_MODULES_DIR", "result/modules")
 CLI = os.environ.get("LOGOSCORE_CLI", "logoscore")
 OUT_DIR = os.environ.get("WEDGE_OUT_DIR", "wedge-diagnostics")
-WAIT_S = int(os.environ.get("WEDGE_WAIT_S", "25"))
+WAIT_S = float(os.environ.get("WEDGE_WAIT_S", "25"))
 WANT_CORE = os.environ.get("WEDGE_CORE") == "1"
-GDB_DEADLINE = "240"
+GDB_DEADLINE = "180"
 
 
 def run(*a: str) -> subprocess.CompletedProcess:
@@ -48,7 +49,7 @@ def container_pids(cname: str) -> list[tuple[str, str]]:
     return pids
 
 
-def gdb_one(pid: str, comm: str) -> str:
+def gdb_cmd(pid: str) -> list[str]:
     exprs = [
         "set pagination off",
         f"set sysroot /proc/{pid}/root",
@@ -61,24 +62,28 @@ def gdb_one(pid: str, comm: str) -> str:
     cmd = ["sudo", "timeout", "-s", "KILL", GDB_DEADLINE, "gdb", "-p", pid, "-batch"]
     for e in exprs:
         cmd += ["-ex", e]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    body = f"===== pid {pid} ({comm}) =====\n{r.stdout}"
-    if r.stderr:
-        body += "\n--- gdb stderr ---\n" + r.stderr
-    return body
+    return cmd
 
 
 def dump_wedge(cname: str) -> int:
     pids = container_pids(cname)
-    bts, maps, kstacks = [], [], []
+    maps, kstacks = [], []
     for pid, comm in pids:
-        bts.append(gdb_one(pid, comm))
-        maps.append(f"===== pid {pid} ({comm}) =====\n" + run("sudo", "cat", f"/proc/{pid}/maps").stdout)
-        kstacks.append(run("sudo", "sh", "-c",
-                           f"for t in /proc/{pid}/task/*; do echo \"== $t ==\"; cat $t/stack 2>/dev/null; done").stdout)
-    write("start_backtraces.txt", "\n\n".join(bts))
+        head = f"===== pid {pid} ({comm}) =====\n"
+        maps.append(head + run("sudo", "cat", f"/proc/{pid}/maps").stdout)
+        kstacks.append(head + run("sudo", "sh", "-c",
+                                   f"for t in /proc/{pid}/task/*; do echo \"== $t ==\"; cat $t/stack 2>/dev/null; done").stdout)
     write("proc_maps.txt", "\n\n".join(maps))
     write("kernel_stacks.txt", "\n\n".join(kstacks))
+
+    running = [(pid, comm, subprocess.Popen(gdb_cmd(pid), stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, text=True))
+               for pid, comm in pids]
+    bts = []
+    for pid, comm, p in running:
+        out, err = p.communicate()
+        bts.append(f"===== pid {pid} ({comm}) =====\n{out}" + (f"\n--- gdb stderr ---\n{err}" if err else ""))
+    write("start_backtraces.txt", "\n\n".join(bts))
     return len(pids)
 
 
@@ -104,19 +109,22 @@ def main() -> int:
                 start_out["e"] = repr(e)
 
         threading.Thread(target=do_start, daemon=True).start()
-        time.sleep(WAIT_S)
+        deadline = time.monotonic() + WAIT_S
+        while time.monotonic() < deadline and not start_out:
+            time.sleep(0.5)
 
-        wedged = not start_out
-        summary.append(f"WEDGED={wedged} start_out={start_out or 'NONE (start never returned)'}")
+        r = start_out.get("r")
+        good = isinstance(r, dict) and r.get("success") is True
+        summary.append(f"WEDGED={not good} start_out={start_out or 'NONE (start never returned)'}")
 
-        if wedged:
+        if not good:
             try:
                 n = dump_wedge(cname)
                 summary.append(f"gdb backtraces captured for {n} container procs")
             except Exception as e:
                 summary.append(f"gdb dump failed: {e!r}")
         else:
-            summary.append("start returned cleanly (good build) — gdb skipped")
+            summary.append("start returned success (good build) — gdb skipped")
 
         logs = run("docker", "logs", cname)
         write("daemon.log", logs.stdout + logs.stderr)
