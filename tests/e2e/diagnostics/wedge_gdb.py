@@ -26,6 +26,7 @@ MODULES_DIR = os.environ.get("LOGOS_MODULES_DIR", "result/modules")
 CLI = os.environ.get("LOGOSCORE_CLI", "logoscore")
 OUT_DIR = os.environ.get("WEDGE_OUT_DIR", "wedge-diagnostics")
 WAIT_S = float(os.environ.get("WEDGE_WAIT_S", "25"))
+LOG_TAIL_S = float(os.environ.get("WEDGE_LOG_TAIL_S", "35"))
 WANT_CORE = os.environ.get("WEDGE_CORE") == "1"
 GDB_DEADLINE = "180"
 
@@ -108,9 +109,9 @@ def main() -> int:
             except Exception as e:
                 start_out["e"] = repr(e)
 
+        t_start = time.monotonic()
         threading.Thread(target=do_start, daemon=True).start()
-        deadline = time.monotonic() + WAIT_S
-        while time.monotonic() < deadline and not start_out:
+        while time.monotonic() - t_start < WAIT_S and not start_out:
             time.sleep(0.5)
 
         r = start_out.get("r")
@@ -123,6 +124,9 @@ def main() -> int:
                 summary.append(f"gdb backtraces captured for {n} container procs")
             except Exception as e:
                 summary.append(f"gdb dump failed: {e!r}")
+            while time.monotonic() - t_start < LOG_TAIL_S:
+                time.sleep(1)
+            summary.append(f"start_out after {LOG_TAIL_S}s: {start_out}")
         else:
             summary.append("start returned success (good build) — gdb skipped")
 
