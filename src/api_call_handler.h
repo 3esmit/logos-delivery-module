@@ -71,6 +71,7 @@ StdLogosResult callApiRetVoid(const std::string& operationName, std::chrono::sec
         callbackCtx->sem.release();
     };
 
+    fprintf(stderr, "%s: about to invoke callbackKey=%p\n", operationName.c_str(), callbackKey);
     int startResult = invoke(callback, callbackKey);
     fprintf(stderr, "%s: invoke returned startResult=%d callbackKey=%p\n", operationName.c_str(), startResult, callbackKey);
     if (startResult != RET_OK) {

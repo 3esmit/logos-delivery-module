@@ -88,6 +88,27 @@ def dump_wedge(cname: str) -> int:
     return len(pids)
 
 
+def inspect_artifacts() -> None:
+    md = os.path.join(MODULES_DIR, MODULE)
+    plugin = os.path.join(md, "delivery_module_plugin.so")
+    lines = [f"modules subdir: {md}", "== ls ==", run("ls", "-l", md).stdout]
+    if os.path.isdir(md):
+        for f in sorted(os.listdir(md)):
+            if ".so" in f:
+                lines.append(run("sha256sum", os.path.join(md, f)).stdout.strip())
+    grep = run("sh", "-c",
+               f"strings {plugin} | grep -E 'about to invoke|invoke returned startResult|callApiRetVoid callback fired' "
+               "|| echo NO_INSTRUMENTATION_STRINGS")
+    lines += ["== instrumentation literals in loaded plugin ==", grep.stdout.strip() or grep.stderr.strip()]
+    ldd_p = run("ldd", plugin)
+    lines += ["== ldd plugin ==", ldd_p.stdout + ldd_p.stderr]
+    lib = os.path.join(md, "liblogosdelivery.so")
+    if os.path.exists(lib):
+        ldd_l = run("ldd", lib)
+        lines += ["== ldd liblogosdelivery ==", ldd_l.stdout + ldd_l.stderr]
+    write("artifacts.txt", "\n".join(lines))
+
+
 def main() -> int:
     os.makedirs(OUT_DIR, exist_ok=True)
     summary = [f"image={IMAGE}", f"modules_dir={MODULES_DIR}", f"wait_s={WAIT_S}"]
@@ -124,6 +145,11 @@ def main() -> int:
                 summary.append(f"gdb backtraces captured for {n} container procs")
             except Exception as e:
                 summary.append(f"gdb dump failed: {e!r}")
+            try:
+                inspect_artifacts()
+                summary.append("artifact inspection -> artifacts.txt")
+            except Exception as e:
+                summary.append(f"artifact inspection failed: {e!r}")
             while time.monotonic() - t_start < LOG_TAIL_S:
                 time.sleep(1)
             summary.append(f"start_out after {LOG_TAIL_S}s: {start_out}")
