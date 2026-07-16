@@ -150,6 +150,14 @@ def main() -> int:
                 summary.append("artifact inspection -> artifacts.txt")
             except Exception as e:
                 summary.append(f"artifact inspection failed: {e!r}")
+            probes: dict = {}
+            for m in ("version", "getAvailableConfigs"):
+                pt = time.monotonic()
+                try:
+                    probes[m] = {"ok": client.call(MODULE, m, timeout=15), "s": round(time.monotonic() - pt, 1)}
+                except Exception as e:
+                    probes[m] = {"err": repr(e), "s": round(time.monotonic() - pt, 1)}
+            summary.append(f"post-wedge RPC probes: {probes}")
             while time.monotonic() - t_start < LOG_TAIL_S:
                 time.sleep(1)
             summary.append(f"start_out after {LOG_TAIL_S}s: {start_out}")
