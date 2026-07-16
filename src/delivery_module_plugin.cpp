@@ -42,6 +42,7 @@ int64_t currentTimestampNs() {
 
 DeliveryModuleImpl::DeliveryModuleImpl() : deliveryCtx(nullptr)
 {
+    setvbuf(stderr, nullptr, _IONBF, 0);
     fprintf(stderr, "DeliveryModuleImpl: Initializing...\n");
     fprintf(stderr, "DeliveryModuleImpl: Initialized successfully\n");
 }
