@@ -1,7 +1,6 @@
 #pragma once
 
 #include <chrono>
-#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <semaphore>
@@ -51,15 +50,11 @@ StdLogosResult callApiRetVoid(const std::string& operationName, std::chrono::sec
     }
 
     auto callback = +[](int callerRet, const char* msg, size_t len, void* userData) {
-        fprintf(stderr, "callApiRetVoid callback fired: userData=%p callerRet=%d\n", userData, callerRet);
-        fflush(stderr);
         std::shared_ptr<CallbackContext> callbackCtx;
         {
             std::lock_guard<std::mutex> lock(pendingMutex);
             auto it = pendingContexts.find(userData);
             if (it == pendingContexts.end()) {
-                fprintf(stderr, "callApiRetVoid callback: userData=%p not in pendingContexts (miss)\n", userData);
-                fflush(stderr);
                 return;
             }
             callbackCtx = it->second;
@@ -73,11 +68,7 @@ StdLogosResult callApiRetVoid(const std::string& operationName, std::chrono::sec
         callbackCtx->sem.release();
     };
 
-    fprintf(stderr, "%s: about to invoke callbackKey=%p\n", operationName.c_str(), callbackKey);
-    fflush(stderr);
     int startResult = invoke(callback, callbackKey);
-    fprintf(stderr, "%s: invoke returned startResult=%d callbackKey=%p\n", operationName.c_str(), startResult, callbackKey);
-    fflush(stderr);
     if (startResult != RET_OK) {
         std::lock_guard<std::mutex> lock(pendingMutex);
         pendingContexts.erase(callbackKey);
@@ -87,8 +78,6 @@ StdLogosResult callApiRetVoid(const std::string& operationName, std::chrono::sec
     if (!callbackCtx->sem.try_acquire_for(timeout)) {
         std::lock_guard<std::mutex> lock(pendingMutex);
         pendingContexts.erase(callbackKey);
-        fprintf(stderr, "%s: semaphore timeout, callback never fired for callbackKey=%p\n", operationName.c_str(), callbackKey);
-        fflush(stderr);
         return {false, {}, operationName + " callback timeout"};
     }
 
