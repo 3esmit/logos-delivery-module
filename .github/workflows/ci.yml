@@ -1,42 +1,31 @@
 name: CI
 
-on:
-  pull_request:
-    branches: [master, main]
-  push:
-    branches: [master, main]
+permissions:
+  contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
 
 jobs:
   build-and-test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Setup Attic cache
-        uses: ryanccn/attic-action@v0
+      - uses: cachix/install-nix-action@v27
         with:
-          endpoint: ${{ secrets.ATTIC_ENDPOINT }}
-          cache: public
-          token: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
-          skip-push: ${{ github.event_name == 'pull_request' }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
 
-      - name: Build module
-        run: nix build -L
+      - uses: cachix/cachix-action@v15
+        with:
+          name: logos-co
 
-      - name: Run tests
-        run: nix build .#unit-tests -L
+      - name: Build module and run unit tests
+        run: |
+          nix build --accept-flake-config -L
+          nix build --accept-flake-config '.#checks.x86_64-linux.unit-tests' -L
