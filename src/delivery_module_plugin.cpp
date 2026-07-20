@@ -1,4 +1,5 @@
 #include "delivery_module_plugin.h"
+#include <climits>
 #include <cstdio>
 #include <ctime>
 #include <memory>
@@ -11,9 +12,7 @@
 #include <boost/beast/core/detail/base64.hpp>
 
 #include "api_call_handler.h"
-extern "C" {
-#include <liblogosdelivery.h>
-}
+#include <liblogosdelivery_kernel.h>
 
 namespace {
 namespace b64 = boost::beast::detail::base64;
@@ -389,6 +388,40 @@ StdLogosResult DeliveryModuleImpl::unsubscribe(const std::string& contentTopic)
     }
 
     fprintf(stderr, "DeliveryModuleImpl: Unsubscribe completed for topic: %s with success\n", contentTopic.c_str());
+    return outcome;
+}
+
+StdLogosResult DeliveryModuleImpl::storeQuery(
+    const std::string& queryJson,
+    const std::string& peerAddr,
+    int64_t timeoutMs)
+{
+    if (!deliveryCtx) {
+        return {false, {}, "Context not initialized"};
+    }
+    if (queryJson.empty()) {
+        return {false, {}, "Store query JSON must not be empty"};
+    }
+    if (peerAddr.empty()) {
+        return {false, {}, "Store provider address must not be empty"};
+    }
+    if (timeoutMs <= 0 || timeoutMs > static_cast<int64_t>(INT_MAX)) {
+        return {false, {}, "Store query timeout must be a positive 32-bit integer"};
+    }
+
+    auto outcome = callApiRetValue(
+        "store_query",
+        std::chrono::milliseconds(timeoutMs),
+        bindApiCall(
+            waku_store_query,
+            deliveryCtx,
+            queryJson.c_str(),
+            peerAddr.c_str(),
+            static_cast<int>(timeoutMs)));
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Store query failed: %s\n",
+                outcome.error.c_str());
+    }
     return outcome;
 }
 
