@@ -155,7 +155,7 @@ public:
     StdLogosResult unsubscribe(const std::string& contentTopic);
 
     /**
-     * @brief Queries a configured Waku Store provider for retained messages.
+     * @brief Queries an explicit Waku Store provider for retained messages.
      *
      * @param queryJson Store query JSON accepted by logos-delivery.
      * @param peerAddr Explicit Store-provider multiaddress. The module does
