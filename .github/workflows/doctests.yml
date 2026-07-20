@@ -39,6 +39,9 @@ concurrency:
 jobs:
   doctests:
     name: delivery-module doc-tests (${{ matrix.os }})
+    env:
+      ATTIC_ENDPOINT: ${{ secrets.ATTIC_ENDPOINT }}
+      ATTIC_TOKEN_PUBLIC: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
     strategy:
       fail-fast: false
       matrix:
@@ -55,11 +58,12 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@main
 
       - name: Setup Attic cache
+        if: ${{ env.ATTIC_ENDPOINT != '' && env.ATTIC_TOKEN_PUBLIC != '' }}
         uses: ryanccn/attic-action@v0
         with:
-          endpoint: ${{ secrets.ATTIC_ENDPOINT }}
+          endpoint: ${{ env.ATTIC_ENDPOINT }}
           cache: public
-          token: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+          token: ${{ env.ATTIC_TOKEN_PUBLIC }}
           skip-push: ${{ github.event_name == 'pull_request' }}
 
       - name: Verify module builds from this commit
