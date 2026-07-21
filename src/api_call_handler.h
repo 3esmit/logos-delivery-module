@@ -94,7 +94,7 @@ StdLogosResult callApiRetVoid(const std::string& operationName, std::chrono::sec
 template <typename BoundInvoke>
 StdLogosResult callApiRetValue(
     const std::string& operationName,
-    std::chrono::seconds timeout,
+    std::chrono::milliseconds timeout,
     BoundInvoke&& invoke)
 {
     struct CallbackContext {

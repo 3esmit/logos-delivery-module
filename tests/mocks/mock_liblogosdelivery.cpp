@@ -92,6 +92,20 @@ int logosdelivery_unsubscribe(void* /*ctx*/, logosdelivery_callback cb, void* us
     return RET_OK;
 }
 
+int waku_store_query(void* /*ctx*/, logosdelivery_callback cb, void* userData,
+                     const char* /*jsonQuery*/, const char* /*peerAddr*/, int /*timeoutMs*/) {
+    LOGOS_CMOCK_RECORD("waku_store_query");
+    int dispatch = LOGOS_CMOCK_RETURN(int, "waku_store_query_dispatch");
+    if (dispatch == RET_OK) {
+        int callbackResult = LOGOS_CMOCK_RETURN(int, "waku_store_query_callback_result");
+        const char* response = LogosCMockStore::instance().getReturnString("waku_store_query");
+        if (cb) {
+            cb(callbackResult, response ? response : "", response ? strlen(response) : 0, userData);
+        }
+    }
+    return dispatch;
+}
+
 int logosdelivery_get_node_info(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*attributeName*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_get_node_info");
     invokeOk("logosdelivery_get_node_info", cb, userData);

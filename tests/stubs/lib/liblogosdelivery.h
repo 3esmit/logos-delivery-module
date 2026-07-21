@@ -14,7 +14,8 @@
 extern "C" {
 #endif
 
-typedef void (*logosdelivery_callback)(int callerRet, const char* msg, size_t len, void* userData);
+typedef void (*FFICallBack)(int callerRet, const char* msg, size_t len, void* userData);
+typedef FFICallBack logosdelivery_callback;
 
 // Create a new delivery node from a JSON config string.
 // Returns a non-null context pointer on success; null on failure (callback fired with error).

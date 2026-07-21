@@ -3,6 +3,9 @@
 // Mocks invoke callbacks synchronously so the semaphore inside api_call_handler.h
 // is released before try_acquire_for starts waiting.
 
+#include <climits>
+
+#include <liblogosdelivery.h>
 #include <logos_test.h>
 #include "delivery_module_plugin.h"
 #include "mocks/delivery_module_events_stub.h"
@@ -242,6 +245,82 @@ LOGOS_TEST(unsubscribe_succeeds_with_context) {
 
     LOGOS_ASSERT_TRUE(impl->unsubscribe("/test/1/delivery/proto").success);
     LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_unsubscribe"));
+
+    delete impl;
+}
+
+// Store query
+
+LOGOS_TEST(storeQuery_fails_without_createNode) {
+    auto t = LogosTestContext("delivery_module");
+    DeliveryModuleImpl impl;
+
+    LOGOS_ASSERT_FALSE(impl.storeQuery("{}", "/ip4/127.0.0.1/tcp/8645", 5000).success);
+    LOGOS_ASSERT_FALSE(t.cFunctionCalled("waku_store_query"));
+}
+
+LOGOS_TEST(storeQuery_rejects_missing_provider_or_timeout) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+
+    LOGOS_ASSERT_FALSE(impl->storeQuery("", "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc", 5000).success);
+    LOGOS_ASSERT_FALSE(impl->storeQuery("{}", "", 5000).success);
+    LOGOS_ASSERT_FALSE(impl->storeQuery("{}", "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc", 0).success);
+    LOGOS_ASSERT_FALSE(impl->storeQuery("{}", "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc", static_cast<int64_t>(INT_MAX) + 1).success);
+    LOGOS_ASSERT_FALSE(t.cFunctionCalled("waku_store_query"));
+
+    delete impl;
+}
+
+LOGOS_TEST(storeQuery_returns_store_response_json) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    const char* response = R"({"requestId":"query-1","statusCode":200,"statusDesc":"OK","messages":[]})";
+    t.mockCFunction("waku_store_query").returns(response);
+
+    StdLogosResult result = impl->storeQuery(
+        R"({"requestId":"query-1","includeData":true,"paginationForward":true})",
+        "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc",
+        5000);
+
+    LOGOS_ASSERT_TRUE(result.success);
+    LOGOS_ASSERT_EQ(result.value.get<std::string>(), std::string(response));
+    LOGOS_ASSERT(t.cFunctionCalled("waku_store_query"));
+
+    delete impl;
+}
+
+LOGOS_TEST(storeQuery_reports_dispatch_failure) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    t.mockCFunction("waku_store_query_dispatch").returns(1);
+
+    StdLogosResult result = impl->storeQuery(
+        R"({"requestId":"query-1","includeData":true,"paginationForward":true})",
+        "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc",
+        5000);
+
+    LOGOS_ASSERT_FALSE(result.success);
+    LOGOS_ASSERT_FALSE(result.error.empty());
+    LOGOS_ASSERT(t.cFunctionCalled("waku_store_query"));
+
+    delete impl;
+}
+
+LOGOS_TEST(storeQuery_reports_callback_failure) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    t.mockCFunction("waku_store_query").returns("Store provider rejected the request");
+    t.mockCFunction("waku_store_query_callback_result").returns(RET_ERR);
+
+    StdLogosResult result = impl->storeQuery(
+        R"({"requestId":"query-1","includeData":true,"paginationForward":true})",
+        "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc",
+        5000);
+
+    LOGOS_ASSERT_FALSE(result.success);
+    LOGOS_ASSERT_CONTAINS(result.error, "Store provider rejected the request");
+    LOGOS_ASSERT(t.cFunctionCalled("waku_store_query"));
 
     delete impl;
 }

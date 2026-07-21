@@ -54,7 +54,21 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      - name: Check Attic cache credentials
+        id: attic_credentials
+        shell: bash
+        env:
+          ATTIC_ENDPOINT: ${{ secrets.ATTIC_ENDPOINT }}
+          ATTIC_TOKEN_PUBLIC: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+        run: |
+          if [[ -n "$ATTIC_ENDPOINT" && -n "$ATTIC_TOKEN_PUBLIC" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Attic cache
+        if: ${{ steps.attic_credentials.outputs.configured == 'true' }}
         uses: ryanccn/attic-action@v0
         with:
           endpoint: ${{ secrets.ATTIC_ENDPOINT }}

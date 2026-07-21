@@ -154,6 +154,21 @@ public:
      */
     StdLogosResult unsubscribe(const std::string& contentTopic);
 
+    /**
+     * @brief Queries an explicit Waku Store provider for retained messages.
+     *
+     * @param queryJson Store query JSON accepted by logos-delivery.
+     * @param peerAddr Explicit Store-provider multiaddress. The module does
+     *        not select a peer implicitly.
+     * @param timeoutMs Request timeout in milliseconds. It is passed to the
+     *        FFI call and bounds the module callback wait; must be positive.
+     * @return The Store response JSON on success.
+     */
+    StdLogosResult storeQuery(
+        const std::string& queryJson,
+        const std::string& peerAddr,
+        int64_t timeoutMs);
+
     StdLogosResult getAvailableNodeInfoIDs();
 
     /**
