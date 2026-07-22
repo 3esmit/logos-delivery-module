@@ -15,7 +15,7 @@
   };
 
   outputs = inputs@{ logos-module-builder, ... }:
-    logos-module-builder.lib.mkLogosModule {
+    let module = logos-module-builder.lib.mkLogosModule {
       src = ./.;
       configFile = ./metadata.json;
       flakeInputs = inputs;
@@ -103,5 +103,15 @@
           patchelf --set-rpath '$ORIGIN' "$out/lib/delivery_module_plugin.so"
         fi
       '';
+    };
+    in module // {
+      packages = builtins.mapAttrs (_: packages:
+        packages // {
+          # `lgx` is the distribution artifact. Keep the raw Nix-store
+          # bundle available explicitly for developer environments.
+          lgx-dev = packages.lgx;
+          lgx = packages.lgx-portable;
+        }
+      ) module.packages;
     };
 }
