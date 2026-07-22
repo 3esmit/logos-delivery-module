@@ -93,6 +93,15 @@
           chmod u+w "$out/lib/liblogosdelivery.so"
           patchelf --set-rpath '$ORIGIN' "$out/lib/liblogosdelivery.so"
         fi
+
+        # LogosCore loads the plugin with the host system loader, not the Nix
+        # build environment. Keep the plugin's runtime lookup within the
+        # installed module directory, where the bundle places its libraries.
+        if [ -f "$out/lib/delivery_module_plugin.so" ]; then
+          echo "Fixing rpath in delivery_module_plugin.so: using \$ORIGIN"
+          chmod u+w "$out/lib/delivery_module_plugin.so"
+          patchelf --set-rpath '$ORIGIN' "$out/lib/delivery_module_plugin.so"
+        fi
       '';
     };
 }
