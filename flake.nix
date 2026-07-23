@@ -15,7 +15,7 @@
   };
 
   outputs = inputs@{ logos-module-builder, ... }:
-    logos-module-builder.lib.mkLogosModule {
+    let module = logos-module-builder.lib.mkLogosModule {
       src = ./.;
       configFile = ./metadata.json;
       flakeInputs = inputs;
@@ -93,6 +93,25 @@
           chmod u+w "$out/lib/liblogosdelivery.so"
           patchelf --set-rpath '$ORIGIN' "$out/lib/liblogosdelivery.so"
         fi
+
+        # LogosCore loads the plugin with the host system loader, not the Nix
+        # build environment. Keep the plugin's runtime lookup within the
+        # installed module directory, where the bundle places its libraries.
+        if [ -f "$out/lib/delivery_module_plugin.so" ]; then
+          echo "Fixing rpath in delivery_module_plugin.so: using \$ORIGIN"
+          chmod u+w "$out/lib/delivery_module_plugin.so"
+          patchelf --set-rpath '$ORIGIN' "$out/lib/delivery_module_plugin.so"
+        fi
       '';
+    };
+    in module // {
+      packages = builtins.mapAttrs (_: packages:
+        packages // {
+          # `lgx` is the distribution artifact. Keep the raw Nix-store
+          # bundle available explicitly for developer environments.
+          lgx-dev = packages.lgx;
+          lgx = packages.lgx-portable;
+        }
+      ) module.packages;
     };
 }
