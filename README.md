@@ -33,7 +33,7 @@ nix build '.#lib'
 # Build only the generated headers
 nix build '.#include'
 
-# build module in local and in protable logos_core format
+# Build module in local and portable Logos Core formats.
 nix build .#lgx / .#lgx-portable
 ```
 
@@ -53,6 +53,17 @@ nix build --extra-experimental-features 'nix-command flakes'
 ```
 
 The compiled artifacts can be found at `result/`
+
+## Releases
+
+This repository owns Delivery module package releases. After a versioned
+change is merged to `master`, run the **Publish Delivery Module** workflow
+from `master`. It creates an alpha GitHub prerelease tagged
+`delivery_module-v<version>` with one portable package covering
+`linux-amd64` and `darwin-arm64`, plus its release sidecar.
+
+The release workflow does not rebuild or publish a catalog index. Catalogs may
+index these source-owned assets separately.
 
 ## Output Structure
 

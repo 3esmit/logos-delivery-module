@@ -38,6 +38,13 @@ Example: `0.2.3` is the fourth release of the module targeting Logos Testnet 2.
 
 ## Releasing
 
-1. Update `"version"` in [`metadata.json`](../metadata.json).
-2. Tag the commit: `git tag v<version>`.
-3. Push the tag: `git push origin v<version>`.
+1. Update `"version"` in [`metadata.json`](../metadata.json) and the runtime
+   version reported by the module.
+2. Add an entry for the version to [`CHANGELOG.md`](../CHANGELOG.md).
+3. Open and merge the versioned change through the normal review process.
+4. From `master`, run the **Publish Delivery Module** workflow.
+
+The source workflow creates an alpha prerelease tagged
+`delivery_module-v<version>` with a portable package for `linux-amd64` and
+`darwin-arm64`. It does not rebuild a catalog index; catalog repositories may
+index the source-owned release assets separately.
