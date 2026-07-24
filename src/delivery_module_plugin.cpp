@@ -426,7 +426,7 @@ StdLogosResult DeliveryModuleImpl::storeQuery(
 }
 
 std::string DeliveryModuleImpl::version() const {
-    std::string moduleVersion = "1.1.0";
+    std::string moduleVersion = "0.1.5";
     if (!deliveryCtx) {
         fprintf(stderr, "DeliveryModuleImpl: Cannot get version - context not initialized. Call createNode first.\n");
         return moduleVersion + " (liblogosdelivery version unknown, context not initialized)";
