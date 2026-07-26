@@ -10,12 +10,55 @@
 
 #include "delivery_module_plugin.h"
 
+#include <mutex>
+#include <vector>
+
 #include "delivery_module_events_stub.h"
 
 namespace delivery_test_events {
 NodeLifecycleEvent g_lastNodeStarted{};
 NodeLifecycleEvent g_lastNodeStopped{};
+namespace {
+std::mutex nodeChangedEventsMutex;
+std::vector<std::string> nodeChangedEvents;
+}
+
+void resetNodeLifecycleEvents()
+{
+    std::lock_guard<std::mutex> lock(nodeChangedEventsMutex);
+    g_lastNodeStarted = NodeLifecycleEvent{};
+    g_lastNodeStopped = NodeLifecycleEvent{};
+    nodeChangedEvents.clear();
+}
+
+std::size_t nodeChangedEventCount()
+{
+    std::lock_guard<std::mutex> lock(nodeChangedEventsMutex);
+    return nodeChangedEvents.size();
+}
+
+std::string nodeChangedEventAt(std::size_t index)
+{
+    std::lock_guard<std::mutex> lock(nodeChangedEventsMutex);
+    return index < nodeChangedEvents.size() ? nodeChangedEvents[index] : std::string();
+}
+
+std::string lastNodeChangedEvent()
+{
+    std::lock_guard<std::mutex> lock(nodeChangedEventsMutex);
+    return nodeChangedEvents.empty() ? std::string() : nodeChangedEvents.back();
+}
+
+void recordNodeChangedEvent(const std::string& event)
+{
+    std::lock_guard<std::mutex> lock(nodeChangedEventsMutex);
+    nodeChangedEvents.push_back(event);
+}
 } // namespace delivery_test_events
+
+void DeliveryModuleImpl::nodeChanged(const std::string& event) {
+    delivery_test_events::recordNodeChangedEvent(event);
+}
 
 void DeliveryModuleImpl::messageSent(const std::string&, const std::string&, int64_t) {}
 void DeliveryModuleImpl::messageError(const std::string&, const std::string&, const std::string&, int64_t) {}

@@ -3,6 +3,7 @@
 // (nodeStarted / nodeStopped).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -18,9 +19,9 @@ struct NodeLifecycleEvent {
 extern NodeLifecycleEvent g_lastNodeStarted;
 extern NodeLifecycleEvent g_lastNodeStopped;
 
-inline void resetNodeLifecycleEvents() {
-    g_lastNodeStarted = NodeLifecycleEvent{};
-    g_lastNodeStopped = NodeLifecycleEvent{};
-}
+void resetNodeLifecycleEvents();
+std::size_t nodeChangedEventCount();
+std::string nodeChangedEventAt(std::size_t index);
+std::string lastNodeChangedEvent();
 
 } // namespace delivery_test_events

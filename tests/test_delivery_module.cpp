@@ -4,11 +4,86 @@
 // is released before try_acquire_for starts waiting.
 
 #include <climits>
+#include <chrono>
+#include <limits>
+#include <thread>
 
 #include <liblogosdelivery.h>
 #include <logos_test.h>
+#include <nlohmann/json.hpp>
 #include "delivery_module_plugin.h"
 #include "mocks/delivery_module_events_stub.h"
+#include "mocks/mock_liblogosdelivery_control.h"
+
+using nlohmann::json;
+
+namespace {
+
+constexpr const char* kLifecycleCommandSchema =
+    "logos.managed_node_lifecycle.command";
+
+json lifecycleSnapshot(DeliveryModuleImpl& impl)
+{
+    return json::parse(impl.nodeStatus());
+}
+
+json lifecycleCommand(const std::string& operationId,
+                      const std::string& action,
+                      const json& parameters = json::object())
+{
+    return {
+        {"schema", kLifecycleCommandSchema},
+        {"version", 1},
+        {"operation_id", operationId},
+        {"action", action},
+        {"parameters", parameters},
+    };
+}
+
+json lifecycleCommandWithExpected(const std::string& operationId,
+                                  const std::string& action,
+                                  const json& snapshot,
+                                  const json& parameters = json::object())
+{
+    json command = lifecycleCommand(operationId, action, parameters);
+    command["expected"] = {
+        {"instance_id", snapshot.at("instance_id")},
+        {"epoch", snapshot.at("epoch")},
+        {"sequence", snapshot.at("sequence")},
+    };
+    return command;
+}
+
+json lastNodeChangedEvent()
+{
+    return json::parse(delivery_test_events::lastNodeChangedEvent());
+}
+
+bool waitForLifecycleState(DeliveryModuleImpl& impl,
+                           const std::string& expectedState,
+                           std::size_t expectedEventCount = 0)
+{
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const json status = lifecycleSnapshot(impl);
+        if (status.at("state").get<std::string>() == expectedState
+            && delivery_test_events::nodeChangedEventCount() >= expectedEventCount) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+bool waitForHeldCreateCallback()
+{
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (mock_delivery_has_held_create()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Helper: create an impl that has a valid delivery context (createNode called).
@@ -158,6 +233,264 @@ LOGOS_TEST(stop_returns_false_when_dispatch_fails) {
     LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStopped.fired);
 
     delete impl;
+}
+
+// V1 managed-node lifecycle contract
+
+LOGOS_TEST(nodeStatus_reports_uninitialized_v1_lifecycle_contract) {
+    auto t = LogosTestContext("delivery_module");
+    DeliveryModuleImpl impl;
+
+    const json status = lifecycleSnapshot(impl);
+    LOGOS_ASSERT_EQ(status.at("schema").get<std::string>(),
+                    std::string("logos.managed_node_lifecycle.snapshot"));
+    LOGOS_ASSERT_EQ(status.at("version").get<int>(), 1);
+    LOGOS_ASSERT_EQ(status.at("scope").at("kind").get<std::string>(),
+                    std::string("messaging"));
+    LOGOS_ASSERT_EQ(status.at("state").get<std::string>(),
+                    std::string("uninitialized"));
+    LOGOS_ASSERT_EQ(status.at("health").get<std::string>(), std::string("unknown"));
+    LOGOS_ASSERT_EQ(status.at("supported_actions").size(), std::size_t{1});
+    LOGOS_ASSERT_EQ(status.at("supported_actions").at(0).get<std::string>(),
+                    std::string("initialize"));
+    LOGOS_ASSERT_TRUE(status.at("pending_operation").is_null());
+    LOGOS_ASSERT_TRUE(status.at("last_completed_operation").is_null());
+}
+
+LOGOS_TEST(nodeAction_initializes_with_v1_acknowledgement_and_events) {
+    auto t = LogosTestContext("delivery_module");
+    t.mockCFunction("logosdelivery_create_node").returns(1);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+    mock_delivery_hold_next_create();
+
+    DeliveryModuleImpl impl;
+    const json command = lifecycleCommand(
+        "delivery-initialize-1", "initialize",
+        {{"config", R"({"logLevel":"INFO"})"}});
+    const auto startedAt = std::chrono::steady_clock::now();
+    const json acknowledgement = json::parse(impl.nodeAction(command.dump()));
+    const auto acknowledgementElapsed = std::chrono::steady_clock::now() - startedAt;
+
+    LOGOS_ASSERT_EQ(acknowledgement.at("schema").get<std::string>(),
+                    std::string("logos.managed_node_lifecycle.ack"));
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_FALSE(acknowledgement.at("duplicate").get<bool>());
+    LOGOS_ASSERT_EQ(acknowledgement.at("operation_id").get<std::string>(),
+                    std::string("delivery-initialize-1"));
+    LOGOS_ASSERT_EQ(acknowledgement.at("state").get<std::string>(),
+                    std::string("initializing"));
+    LOGOS_ASSERT_TRUE(acknowledgementElapsed < std::chrono::seconds(1));
+    LOGOS_ASSERT_TRUE(waitForHeldCreateCallback());
+    const json pending = lifecycleSnapshot(impl);
+    LOGOS_ASSERT_EQ(pending.at("state").get<std::string>(), std::string("initializing"));
+    LOGOS_ASSERT_EQ(pending.at("pending_operation").at("operation_id").get<std::string>(),
+                    std::string("delivery-initialize-1"));
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_create(RET_OK, "created"));
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(impl, "stopped", 2));
+    LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_create_node"));
+
+    const json status = lifecycleSnapshot(impl);
+    LOGOS_ASSERT_EQ(status.at("state").get<std::string>(), std::string("stopped"));
+    LOGOS_ASSERT_EQ(status.at("epoch").get<std::uint64_t>(), std::uint64_t{1});
+    LOGOS_ASSERT_EQ(status.at("last_completed_operation").at("operation_id").get<std::string>(),
+                    std::string("delivery-initialize-1"));
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{2});
+    LOGOS_ASSERT_EQ(json::parse(delivery_test_events::nodeChangedEventAt(0))
+                            .at("phase").get<std::string>(),
+                    std::string("accepted"));
+    const json settled = lastNodeChangedEvent();
+    LOGOS_ASSERT_EQ(settled.at("phase").get<std::string>(), std::string("settled"));
+    LOGOS_ASSERT_EQ(settled.at("outcome").get<std::string>(), std::string("succeeded"));
+    LOGOS_ASSERT_EQ(settled.at("status").at("state").get<std::string>(),
+                    std::string("stopped"));
+    mock_delivery_reset_held_callbacks();
+}
+
+LOGOS_TEST(nodeAction_start_is_idempotent_while_callback_is_pending) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+
+    const json before = lifecycleSnapshot(*impl);
+    const json command = lifecycleCommandWithExpected(
+        "delivery-start-1", "start", before);
+    mock_delivery_hold_next_start();
+    const json acknowledgement = json::parse(impl->nodeAction(command.dump()));
+
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_FALSE(acknowledgement.at("duplicate").get<bool>());
+    LOGOS_ASSERT_EQ(acknowledgement.at("state").get<std::string>(), std::string("starting"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_start_node"), 1);
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{1});
+
+    const json duplicate = json::parse(impl->nodeAction(command.dump()));
+    LOGOS_ASSERT_TRUE(duplicate.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(duplicate.at("duplicate").get<bool>());
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_start_node"), 1);
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{1});
+
+    json reusedOperationId = command;
+    reusedOperationId["expected"]["sequence"] =
+        reusedOperationId.at("expected").at("sequence").get<std::uint64_t>() + 1;
+    const json operationIdConflict = json::parse(impl->nodeAction(reusedOperationId.dump()));
+    LOGOS_ASSERT_FALSE(operationIdConflict.at("accepted").get<bool>());
+    LOGOS_ASSERT_EQ(operationIdConflict.at("error").at("code").get<std::string>(),
+                    std::string("operation_id_conflict"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_start_node"), 1);
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{1});
+
+    const json pendingStatus = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(pendingStatus.at("state").get<std::string>(), std::string("starting"));
+    LOGOS_ASSERT_EQ(pendingStatus.at("pending_operation").at("operation_id").get<std::string>(),
+                    std::string("delivery-start-1"));
+
+    const json conflicting = json::parse(impl->nodeAction(
+        lifecycleCommand("delivery-start-2", "start").dump()));
+    LOGOS_ASSERT_FALSE(conflicting.at("accepted").get<bool>());
+    LOGOS_ASSERT_EQ(conflicting.at("error").at("code").get<std::string>(),
+                    std::string("operation_in_progress"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_start_node"), 1);
+
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_start(RET_OK, "started"));
+    const json runningStatus = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(runningStatus.at("state").get<std::string>(), std::string("running"));
+    LOGOS_ASSERT_TRUE(runningStatus.at("pending_operation").is_null());
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.fired);
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.success);
+    const json settled = lastNodeChangedEvent();
+    LOGOS_ASSERT_EQ(settled.at("operation_id").get<std::string>(),
+                    std::string("delivery-start-1"));
+    LOGOS_ASSERT_EQ(settled.at("phase").get<std::string>(), std::string("settled"));
+    LOGOS_ASSERT_EQ(settled.at("outcome").get<std::string>(), std::string("succeeded"));
+
+    mock_delivery_reset_held_callbacks();
+    delete impl;
+}
+
+LOGOS_TEST(nodeAction_stop_reports_stopping_then_settles_stopped) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    LOGOS_ASSERT_TRUE(impl->start().success);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+
+    const json before = lifecycleSnapshot(*impl);
+    mock_delivery_hold_next_stop();
+    const json acknowledgement = json::parse(impl->nodeAction(
+        lifecycleCommandWithExpected("delivery-stop-1", "stop", before).dump()));
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_EQ(acknowledgement.at("state").get<std::string>(), std::string("stopping"));
+    LOGOS_ASSERT_EQ(lifecycleSnapshot(*impl).at("state").get<std::string>(),
+                    std::string("stopping"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_stop_node"), 1);
+
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_stop(RET_OK, "stopped"));
+    const json stopped = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(stopped.at("state").get<std::string>(), std::string("stopped"));
+    LOGOS_ASSERT_TRUE(stopped.at("pending_operation").is_null());
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStopped.fired);
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStopped.success);
+    const json settled = lastNodeChangedEvent();
+    LOGOS_ASSERT_EQ(settled.at("operation_id").get<std::string>(),
+                    std::string("delivery-stop-1"));
+    LOGOS_ASSERT_EQ(settled.at("outcome").get<std::string>(), std::string("succeeded"));
+
+    mock_delivery_reset_held_callbacks();
+    delete impl;
+}
+
+LOGOS_TEST(nodeAction_rejects_invalid_envelopes_without_side_effects) {
+    auto t = LogosTestContext("delivery_module");
+    DeliveryModuleImpl impl;
+    delivery_test_events::resetNodeLifecycleEvents();
+
+    const json oversizedVersion = {
+        {"schema", kLifecycleCommandSchema},
+        {"version", std::numeric_limits<std::uint64_t>::max()},
+        {"operation_id", "delivery-invalid-1"},
+        {"action", "start"},
+    };
+    const json acknowledgement = json::parse(impl.nodeAction(oversizedVersion.dump()));
+
+    LOGOS_ASSERT_FALSE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(acknowledgement.at("operation_id").is_null());
+    LOGOS_ASSERT_EQ(acknowledgement.at("error").at("code").get<std::string>(),
+                    std::string("invalid_request"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_create_node"), 0);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_start_node"), 0);
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{0});
+}
+
+LOGOS_TEST(nodeAction_rejects_stale_expected_snapshot_without_dispatch) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetNodeLifecycleEvents();
+
+    json stale = lifecycleSnapshot(*impl);
+    stale["sequence"] = stale.at("sequence").get<std::uint64_t>() + 1;
+    const json acknowledgement = json::parse(impl->nodeAction(
+        lifecycleCommandWithExpected("delivery-start-stale", "start", stale).dump()));
+
+    LOGOS_ASSERT_FALSE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_EQ(acknowledgement.at("error").at("code").get<std::string>(),
+                    std::string("state_mismatch"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_start_node"), 0);
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{1});
+    const json rejected = lastNodeChangedEvent();
+    LOGOS_ASSERT_EQ(rejected.at("phase").get<std::string>(), std::string("settled"));
+    LOGOS_ASSERT_EQ(rejected.at("outcome").get<std::string>(), std::string("rejected"));
+
+    delete impl;
+}
+
+LOGOS_TEST(nodeAction_sanitizes_start_callback_failure) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+
+    mock_delivery_hold_next_start();
+    const json acknowledgement = json::parse(impl->nodeAction(
+        lifecycleCommand("delivery-start-failure", "start").dump()));
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_start(
+        RET_ERR, "delivery callback included secret=not-for-lifecycle-event"));
+
+    const json status = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(status.at("state").get<std::string>(), std::string("stopped"));
+    LOGOS_ASSERT_EQ(status.at("last_error").at("code").get<std::string>(),
+                    std::string("start_failed"));
+    LOGOS_ASSERT_EQ(status.at("last_error").at("message").get<std::string>(),
+                    std::string("Delivery start failed."));
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.fired);
+    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStarted.success);
+    LOGOS_ASSERT_FALSE(delivery_test_events::lastNodeChangedEvent().find("secret=")
+                       != std::string::npos);
+
+    mock_delivery_reset_held_callbacks();
+    delete impl;
+}
+
+LOGOS_TEST(legacy_lifecycle_methods_keep_completion_events_and_update_v1_status) {
+    auto t = LogosTestContext("delivery_module");
+    t.mockCFunction("logosdelivery_create_node").returns(1);
+    delivery_test_events::resetNodeLifecycleEvents();
+
+    DeliveryModuleImpl impl;
+    LOGOS_ASSERT_TRUE(impl.createNode(R"({"logLevel":"INFO"})").success);
+    LOGOS_ASSERT_EQ(lifecycleSnapshot(impl).at("state").get<std::string>(),
+                    std::string("stopped"));
+    LOGOS_ASSERT_TRUE(impl.start().success);
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.fired);
+    LOGOS_ASSERT_EQ(lifecycleSnapshot(impl).at("state").get<std::string>(),
+                    std::string("running"));
+    LOGOS_ASSERT_TRUE(impl.stop().success);
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStopped.fired);
+    LOGOS_ASSERT_EQ(lifecycleSnapshot(impl).at("state").get<std::string>(),
+                    std::string("stopped"));
+    LOGOS_ASSERT_TRUE(delivery_test_events::nodeChangedEventCount() > 0);
 }
 
 // send

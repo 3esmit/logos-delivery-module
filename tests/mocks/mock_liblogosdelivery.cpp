@@ -16,6 +16,8 @@
 
 #include <logos_clib_mock.h>
 #include <cstring>
+#include <mutex>
+#include <optional>
 
 #define RET_OK  0
 #define RET_ERR 1
@@ -24,6 +26,19 @@ typedef void (*logosdelivery_callback)(int callerRet, const char* msg, size_t le
 
 // Sentinel address used as a fake non-null delivery context.
 static char s_fakeCtx = 0;
+
+struct DeferredLifecycleCallback {
+    logosdelivery_callback callback = nullptr;
+    void* userData = nullptr;
+};
+
+std::mutex deferredLifecycleCallbackMutex;
+std::optional<DeferredLifecycleCallback> deferredCreateCallback;
+std::optional<DeferredLifecycleCallback> deferredStartCallback;
+std::optional<DeferredLifecycleCallback> deferredStopCallback;
+bool holdNextCreateCallback = false;
+bool holdNextStartCallback = false;
+bool holdNextStopCallback = false;
 
 // Helper: invoke callback with RET_OK and the string configured in the mock store.
 static void invokeOk(const char* funcName, logosdelivery_callback cb, void* userData) {
@@ -38,7 +53,13 @@ void* logosdelivery_create_node(const char* /*cfg*/, logosdelivery_callback cb, 
     LOGOS_CMOCK_RECORD("logosdelivery_create_node");
     int ok = LOGOS_CMOCK_RETURN(int, "logosdelivery_create_node");
     if (ok && cb) {
-        cb(RET_OK, "", 0, userData);
+        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+        if (holdNextCreateCallback) {
+            holdNextCreateCallback = false;
+            deferredCreateCallback = DeferredLifecycleCallback{cb, userData};
+        } else {
+            cb(RET_OK, "", 0, userData);
+        }
     } else if (!ok && cb) {
         cb(RET_ERR, "mock: create_node fail", 22, userData);
     }
@@ -60,7 +81,13 @@ int logosdelivery_start_node(void* /*ctx*/, logosdelivery_callback cb, void* use
     // completion callback when dispatch "succeeds", mirroring the real FFI.
     int dispatch = LOGOS_CMOCK_RETURN(int, "logosdelivery_start_node");
     if (dispatch == RET_OK) {
-        invokeOk("logosdelivery_start_node", cb, userData);
+        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+        if (holdNextStartCallback) {
+            holdNextStartCallback = false;
+            deferredStartCallback = DeferredLifecycleCallback{cb, userData};
+        } else {
+            invokeOk("logosdelivery_start_node", cb, userData);
+        }
     }
     return dispatch;
 }
@@ -69,7 +96,13 @@ int logosdelivery_stop_node(void* /*ctx*/, logosdelivery_callback cb, void* user
     LOGOS_CMOCK_RECORD("logosdelivery_stop_node");
     int dispatch = LOGOS_CMOCK_RETURN(int, "logosdelivery_stop_node");
     if (dispatch == RET_OK) {
-        invokeOk("logosdelivery_stop_node", cb, userData);
+        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+        if (holdNextStopCallback) {
+            holdNextStopCallback = false;
+            deferredStopCallback = DeferredLifecycleCallback{cb, userData};
+        } else {
+            invokeOk("logosdelivery_stop_node", cb, userData);
+        }
     }
     return dispatch;
 }
@@ -125,3 +158,83 @@ int logosdelivery_get_available_configs(void* /*ctx*/, logosdelivery_callback cb
 }
 
 } // extern "C"
+
+extern "C" void mock_delivery_hold_next_start()
+{
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    holdNextStartCallback = true;
+}
+
+extern "C" void mock_delivery_hold_next_stop()
+{
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    holdNextStopCallback = true;
+}
+
+extern "C" void mock_delivery_hold_next_create()
+{
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    holdNextCreateCallback = true;
+}
+
+extern "C" bool mock_delivery_complete_held_start(int callbackResult, const char* message)
+{
+    std::optional<DeferredLifecycleCallback> deferred;
+    {
+        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+        if (!deferredStartCallback) return false;
+        deferred = std::move(deferredStartCallback);
+        deferredStartCallback.reset();
+    }
+    if (!deferred->callback) return false;
+    const std::size_t length = message ? std::strlen(message) : 0;
+    deferred->callback(callbackResult, message ? message : "", length, deferred->userData);
+    return true;
+}
+
+extern "C" bool mock_delivery_complete_held_stop(int callbackResult, const char* message)
+{
+    std::optional<DeferredLifecycleCallback> deferred;
+    {
+        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+        if (!deferredStopCallback) return false;
+        deferred = std::move(deferredStopCallback);
+        deferredStopCallback.reset();
+    }
+    if (!deferred->callback) return false;
+    const std::size_t length = message ? std::strlen(message) : 0;
+    deferred->callback(callbackResult, message ? message : "", length, deferred->userData);
+    return true;
+}
+
+extern "C" bool mock_delivery_complete_held_create(int callbackResult, const char* message)
+{
+    std::optional<DeferredLifecycleCallback> deferred;
+    {
+        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+        if (!deferredCreateCallback) return false;
+        deferred = std::move(deferredCreateCallback);
+        deferredCreateCallback.reset();
+    }
+    if (!deferred->callback) return false;
+    const std::size_t length = message ? std::strlen(message) : 0;
+    deferred->callback(callbackResult, message ? message : "", length, deferred->userData);
+    return true;
+}
+
+extern "C" bool mock_delivery_has_held_create()
+{
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    return deferredCreateCallback.has_value();
+}
+
+extern "C" void mock_delivery_reset_held_callbacks()
+{
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    deferredCreateCallback.reset();
+    deferredStartCallback.reset();
+    deferredStopCallback.reset();
+    holdNextCreateCallback = false;
+    holdNextStartCallback = false;
+    holdNextStopCallback = false;
+}

@@ -2,8 +2,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <logos_module_context.h>
@@ -124,6 +127,23 @@ public:
     StdLogosResult stop();
 
     /**
+     * @brief Returns the bounded V1 managed-node lifecycle snapshot.
+     *
+     * This is callable before createNode() and deliberately keeps the legacy
+     * Delivery lifecycle surface unchanged.
+     */
+    std::string nodeStatus();
+
+    /**
+     * @brief Accepts a versioned, caller-correlated lifecycle command.
+     *
+     * The command is a JSON object. The immediate result is only an
+     * acknowledgement; accepted asynchronous Start and Stop requests settle
+     * through nodeChanged().
+     */
+    std::string nodeAction(const std::string& request);
+
+    /**
      * @brief Sends a message over the active node.
      *
      * Builds a JSON envelope expected by `logosdelivery_send`:
@@ -208,6 +228,9 @@ public:
     std::string version() const;
 
 logos_events:
+    /// Emits versioned managed-node lifecycle observations.
+    void nodeChanged(const std::string& event);
+
     void messageSent(const std::string& requestId, const std::string& messageHash, int64_t timestamp);
     void messageError(const std::string& requestId, const std::string& messageHash, const std::string& error, int64_t timestamp);
     void messagePropagated(const std::string& requestId, const std::string& messageHash, int64_t timestamp);
@@ -218,9 +241,63 @@ logos_events:
     void nodeStopped(bool success, const std::string& message, int64_t timestamp);
 
 private:
+    enum class LifecycleState : std::uint8_t {
+        Uninitialized,
+        Initializing,
+        Stopped,
+        Starting,
+        Running,
+        Stopping,
+        Destroying,
+    };
+
+    enum class LifecycleDispatchDisposition {
+        Dispatch,
+        Duplicate,
+        Rejected,
+        Noop,
+    };
+
+    struct LifecycleOperation {
+        std::string action;
+        std::string requestFingerprint;
+        std::string acknowledgement;
+        LifecycleState previousState = LifecycleState::Uninitialized;
+        bool settled = false;
+        std::string outcome;
+    };
+
+    struct LifecycleDispatch {
+        LifecycleDispatchDisposition disposition = LifecycleDispatchDisposition::Rejected;
+        std::string action;
+        std::string operationId;
+        LifecycleState previousState = LifecycleState::Uninitialized;
+        std::uint64_t generation = 0;
+        std::string acknowledgement;
+        std::vector<std::string> events;
+    };
+
     void* deliveryCtx;
 
     std::mutex createNodeMutex;
+    mutable std::mutex lifecycleMutex;
+    std::mutex lifecycleWorkerMutex;
+    std::thread lifecycleInitializeWorker;
+    LifecycleState lifecycleState = LifecycleState::Uninitialized;
+    std::uint64_t lifecycleGeneration = 0;
+    std::string lifecycleInstanceId;
+    std::uint64_t lifecycleEpoch = 0;
+    std::uint64_t lifecycleSequence = 0;
+    std::int64_t lifecycleUpdatedAtMs = 0;
+    std::int64_t lifecycleErrorAtMs = 0;
+    std::string lifecycleErrorCode;
+    std::string lifecycleError;
+    bool lifecyclePending = false;
+    std::string activeLifecycleOperationId;
+    std::string activeLifecycleAction;
+    std::uint64_t activeLifecycleGeneration = 0;
+    std::unordered_map<std::string, LifecycleOperation> lifecycleOperations;
+    std::deque<std::string> completedLifecycleOperationIds;
 
     static constexpr std::chrono::seconds CALLBACK_TIMEOUT{30};
 
@@ -237,4 +314,41 @@ private:
     // userData is the DeliveryModuleImpl*.
     static void start_callback(int callerRet, const char* msg, size_t len, void* userData);
     static void stop_callback(int callerRet, const char* msg, size_t len, void* userData);
+
+    LifecycleDispatch beginLifecycleAction(const std::string& action,
+                                           const std::string& operationId,
+                                           const std::string& requestFingerprint,
+                                           bool hasExpectedSnapshot,
+                                           const std::string& expectedInstanceId,
+                                           std::uint64_t expectedEpoch,
+                                           std::uint64_t expectedSequence,
+                                           bool strictAction);
+    StdLogosResult createNodePrepared(const std::string& cfg,
+                                      const LifecycleDispatch& dispatch);
+    bool launchInitializeWorker(const std::string& cfg,
+                                const LifecycleDispatch& dispatch);
+    StdLogosResult startPrepared(const LifecycleDispatch& dispatch);
+    StdLogosResult stopPrepared(const LifecycleDispatch& dispatch);
+    void settleLifecycleAction(const std::string& action,
+                               const std::string& operationId,
+                               std::uint64_t generation,
+                               LifecycleState previousState,
+                               LifecycleState successState,
+                               LifecycleState failureState,
+                               bool success);
+    void settleLifecycleCallback(const std::string& action, bool success);
+    std::string lifecycleSnapshotLocked() const;
+    std::string lifecycleEventLocked(const std::string& action,
+                                     const std::string& operationId,
+                                     const std::string& phase,
+                                     const std::string& outcome,
+                                     LifecycleState previousState,
+                                     const std::string& errorCode = {},
+                                     const std::string& errorMessage = {}) const;
+    void emitLifecycleEvents(const std::vector<std::string>& events);
+    void rememberCompletedLifecycleOperationLocked(const std::string& operationId);
+    static const char* lifecycleStateName(LifecycleState state);
+    static std::vector<std::string> lifecycleActions(LifecycleState state);
+    static const char* lifecycleFailureCode(const std::string& action);
+    static const char* lifecycleFailureMessage(const std::string& action);
 };
