@@ -6,6 +6,7 @@
 // Skipped automatically when liblogosdelivery is not found.
 
 #include <logos_test.h>
+#include <nlohmann/json.hpp>
 #include "delivery_module_plugin.h"
 #include "mocks/delivery_module_events_stub.h"
 
@@ -140,6 +141,14 @@ LOGOS_TEST(integration_getAvailableNodeInfoIDs_returns_non_empty) {
     StdLogosResult result = g_impl->getAvailableNodeInfoIDs();
     LOGOS_ASSERT_TRUE(result.success);
     LOGOS_ASSERT_FALSE(result.value.get<std::string>().empty());
+}
+
+LOGOS_TEST(integration_getConnectedPeersInfo_returns_json_object) {
+    ensureStarted();
+
+    StdLogosResult result = g_impl->getConnectedPeersInfo();
+    LOGOS_ASSERT_TRUE(result.success);
+    LOGOS_ASSERT_TRUE(nlohmann::json::parse(result.value.get<std::string>()).is_object());
 }
 
 LOGOS_TEST(integration_getNodeInfo_returns_value_for_each_id) {

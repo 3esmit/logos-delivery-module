@@ -1159,6 +1159,26 @@ StdLogosResult DeliveryModuleImpl::storeQuery(
     return outcome;
 }
 
+StdLogosResult DeliveryModuleImpl::getConnectedPeersInfo()
+{
+    fprintf(stderr, "DeliveryModuleImpl::getConnectedPeersInfo called\n");
+
+    if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot get connected peers - context not initialized. Call createNode first.\n");
+        return {false, {}, "Context not initialized"};
+    }
+
+    auto outcome = callApiRetValue(
+        "get_connected_peers_info",
+        CALLBACK_TIMEOUT,
+        bindApiCall(waku_get_connected_peers_info, deliveryCtx));
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Get connected peers failed, reason: %s\n",
+                outcome.error.c_str());
+    }
+    return outcome;
+}
+
 std::string DeliveryModuleImpl::version() const {
     std::string moduleVersion = "0.1.7";
     if (!deliveryCtx) {
