@@ -11,7 +11,7 @@
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
-    logos-delivery.url = "git+https://github.com/logos-messaging/logos-delivery?submodules=1";
+    logos-delivery.url = "git+https://github.com/3esmit/logos-delivery?rev=50e602bbc21d44f73c0027c7dbb4cbbb55f178f8&submodules=1";
   };
 
   outputs = inputs@{ logos-module-builder, ... }:

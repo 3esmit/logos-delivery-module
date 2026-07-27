@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.7] - Alpha
+
+### Fixed
+
+- Keep V1 Delivery stop/restart safe by retaining persistency, stopping peer
+  manager workers before transport teardown, and retaining REST routes across
+  listener restart.
+
 ## [0.1.6] - Alpha
 
 ### Added

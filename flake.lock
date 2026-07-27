@@ -1537,19 +1537,20 @@
         "zerokit": "zerokit"
       },
       "locked": {
-        "lastModified": 1782491766,
-        "narHash": "sha256-x2pabiyf4mrH96l9LtyLkIs/JdCs4mqcQhJX3hvxHv4=",
+        "lastModified": 1785146883,
+        "narHash": "sha256-U3bNrqVH4zg6qjmCqVFup1n6HqtNDKdfeGIQ2YGJLnk=",
         "ref": "refs/heads/master",
-        "rev": "26098d76cf7a30f00c76dc5a01d0d74614674628",
-        "revCount": 2382,
+        "rev": "50e602bbc21d44f73c0027c7dbb4cbbb55f178f8",
+        "revCount": 2419,
         "submodules": true,
         "type": "git",
-        "url": "https://github.com/logos-messaging/logos-delivery"
+        "url": "https://github.com/3esmit/logos-delivery"
       },
       "original": {
+        "rev": "50e602bbc21d44f73c0027c7dbb4cbbb55f178f8",
         "submodules": true,
         "type": "git",
-        "url": "https://github.com/logos-messaging/logos-delivery"
+        "url": "https://github.com/3esmit/logos-delivery"
       }
     },
     "logos-design-system": {
