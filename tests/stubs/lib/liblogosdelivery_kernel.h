@@ -10,6 +10,8 @@ extern "C" {
 int waku_store_query(void* ctx, FFICallBack callback, void* userData,
                      const char* jsonQuery, const char* peerAddr, int timeoutMs);
 
+int waku_get_connected_peers_info(void* ctx, FFICallBack callback, void* userData);
+
 #ifdef __cplusplus
 }
 #endif

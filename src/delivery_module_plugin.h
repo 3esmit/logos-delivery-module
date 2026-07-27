@@ -189,6 +189,17 @@ public:
         const std::string& peerAddr,
         int64_t timeoutMs);
 
+    /**
+     * @brief Returns connected Delivery peer metadata from liblogosdelivery.
+     *
+     * The returned value is the raw JSON object produced by
+     * `waku_get_connected_peers_info`: peer IDs map to objects with
+     * `protocols` and `addresses` arrays. This method does not dial, select,
+     * or otherwise mutate peers; callers can use the advertised protocols to
+     * select an explicit Store provider for @ref storeQuery.
+     */
+    StdLogosResult getConnectedPeersInfo();
+
     StdLogosResult getAvailableNodeInfoIDs();
 
     /**

@@ -658,6 +658,68 @@ LOGOS_TEST(storeQuery_reports_callback_failure) {
     delete impl;
 }
 
+// getConnectedPeersInfo
+
+LOGOS_TEST(getConnectedPeersInfo_returns_raw_peer_metadata_json) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    const char* peers = R"({"16Uiu2HAmExample":{"protocols":["/vac/waku/store-query/3.0.0"],"addresses":["/ip4/203.0.113.1/tcp/30303"]}})";
+    t.mockCFunction("waku_get_connected_peers_info").returns(peers);
+
+    StdLogosResult result = impl->getConnectedPeersInfo();
+
+    LOGOS_ASSERT_TRUE(result.success);
+    const json parsed = json::parse(result.value.get<std::string>());
+    LOGOS_ASSERT_TRUE(parsed.is_object());
+    LOGOS_ASSERT_EQ(parsed.at("16Uiu2HAmExample").at("protocols").at(0).get<std::string>(),
+                    std::string("/vac/waku/store-query/3.0.0"));
+    LOGOS_ASSERT_EQ(parsed.at("16Uiu2HAmExample").at("addresses").at(0).get<std::string>(),
+                    std::string("/ip4/203.0.113.1/tcp/30303"));
+    LOGOS_ASSERT(t.cFunctionCalled("waku_get_connected_peers_info"));
+
+    delete impl;
+}
+
+LOGOS_TEST(getConnectedPeersInfo_fails_without_createNode) {
+    auto t = LogosTestContext("delivery_module");
+    DeliveryModuleImpl impl;
+
+    StdLogosResult result = impl.getConnectedPeersInfo();
+
+    LOGOS_ASSERT_FALSE(result.success);
+    LOGOS_ASSERT_EQ(result.error, std::string("Context not initialized"));
+    LOGOS_ASSERT_FALSE(t.cFunctionCalled("waku_get_connected_peers_info"));
+}
+
+LOGOS_TEST(getConnectedPeersInfo_reports_dispatch_failure) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    t.mockCFunction("waku_get_connected_peers_info_dispatch").returns(1);
+
+    StdLogosResult result = impl->getConnectedPeersInfo();
+
+    LOGOS_ASSERT_FALSE(result.success);
+    LOGOS_ASSERT_EQ(result.error, std::string("failed to initiate get_connected_peers_info"));
+    LOGOS_ASSERT(t.cFunctionCalled("waku_get_connected_peers_info"));
+
+    delete impl;
+}
+
+LOGOS_TEST(getConnectedPeersInfo_reports_callback_failure) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    t.mockCFunction("waku_get_connected_peers_info_callback_result").returns(1);
+    t.mockCFunction("waku_get_connected_peers_info").returns("connected peers unavailable");
+
+    StdLogosResult result = impl->getConnectedPeersInfo();
+
+    LOGOS_ASSERT_FALSE(result.success);
+    LOGOS_ASSERT_EQ(result.error, std::string("connected peers unavailable"));
+    LOGOS_ASSERT(t.cFunctionCalled("waku_get_connected_peers_info"));
+
+    delete impl;
+}
+
 // getAvailableNodeInfoIDs
 
 LOGOS_TEST(getAvailableNodeInfoIDs_returns_mocked_string) {
