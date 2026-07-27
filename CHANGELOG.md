@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.8] - Alpha
+
+### Added
+
+- Expose read-only `getConnectedPeersInfo()` metadata so callers can discover
+  connected peers and their advertised protocols before selecting a Store
+  provider.
+
 ## [0.1.7] - Alpha
 
 ### Fixed
