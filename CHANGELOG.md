@@ -8,6 +8,11 @@
   connected peers and their advertised protocols before selecting a Store
   provider.
 
+### Fixed
+
+- Package the shutdown-safe Delivery library revision so stopping a managed
+  Delivery node does not crash the host process.
+
 ## [0.1.7] - Alpha
 
 ### Fixed
