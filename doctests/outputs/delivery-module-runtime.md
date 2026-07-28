@@ -199,7 +199,9 @@ logoscore -D -m ./modules > logs.txt &
 ```
 
 The `-D` flag starts the daemon. The client subcommands below connect to
-this running process via the config written under `~/.logoscore/`.
+this running process via the config written under `~/.logoscore/`. The
+recorded PID is also used to verify shutdown without relying on one
+platform's exact client error text.
 
 ```bash
 sleep 3
@@ -302,9 +304,17 @@ sleep 5
 
 ### 4.13 Confirm the daemon has stopped
 
-With no daemon running, the client reports `not_running` and exits
-non-zero, so we add `|| true` to let the doc-test assert on the output:
+The daemon PID captured at launch must be gone. A final client `status`
+request remains a diagnostic: Linux currently prints `not_running`,
+while macOS can correctly return no text. Any other nonempty response
+is a failure.
 
 ```bash
-logoscore status
+pid="$(cat daemon.pid)"
+if kill -0 "$pid" 2>/dev/null; then
+  echo "daemon PID $pid is still running" >&2
+  exit 1
+fi
+status_output="$(logoscore status 2>&1 || true)"
+test -z "$status_output" || printf '%s\n' "$status_output" | grep -F '"status":"not_running"'
 ```

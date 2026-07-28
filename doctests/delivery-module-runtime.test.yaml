@@ -181,11 +181,15 @@ sections:
         text: |
           Start logoscore in daemon mode in the background, capturing output to
           `logs.txt`:
-        run: "sh -c './logos/bin/logoscore -D -m ./modules > logs.txt 2>&1 &'"
+        run: |
+          sh -c './logos/bin/logoscore -D -m ./modules > logs.txt 2>&1 & echo $! > daemon.pid'
+          test -s daemon.pid
         code_block: "logoscore -D -m ./modules > logs.txt &"
         post_text: |
           The `-D` flag starts the daemon. The client subcommands below connect to
-          this running process via the config written under `~/.logoscore/`.
+          this running process via the config written under `~/.logoscore/`. The
+          recorded PID is also used to verify shutdown without relying on one
+          platform's exact client error text.
 
       - run: "sleep 3"
 
@@ -269,9 +273,31 @@ sections:
 
       - title: "Confirm the daemon has stopped"
         text: |
-          With no daemon running, the client reports `not_running` and exits
-          non-zero, so we add `|| true` to let the doc-test assert on the output:
-        run: "./logos/bin/logoscore status || true"
-        code_block: "logoscore status"
+          The daemon PID captured at launch must be gone. A final client `status`
+          request remains a diagnostic: Linux currently prints `not_running`,
+          while macOS can correctly return no text. Any other nonempty response
+          is a failure.
+        run: |
+          pid="$(cat daemon.pid)"
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "daemon PID $pid is still running" >&2
+            exit 1
+          fi
+          status_output="$(./logos/bin/logoscore status 2>&1 || true)"
+          if [ -n "$status_output" ] && ! printf '%s\n' "$status_output" | grep -Fq '"status":"not_running"'; then
+            printf '%s\n' "$status_output"
+            echo "unexpected status after daemon exit" >&2
+            exit 1
+          fi
+          printf '%s\n' "$status_output"
+          printf 'daemon PID %s has exited\n' "$pid"
+        code_block: |
+          pid="$(cat daemon.pid)"
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "daemon PID $pid is still running" >&2
+            exit 1
+          fi
+          status_output="$(logoscore status 2>&1 || true)"
+          test -z "$status_output" || printf '%s\n' "$status_output" | grep -F '"status":"not_running"'
         expect_contains:
-          - '"status":"not_running"'
+          - "has exited"
