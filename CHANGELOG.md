@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9] - Alpha
+
+### Fixed
+
+- Preserve binary `messageReceived()` payloads across the portable cdylib event
+  bridge.
+
 ## [0.1.8] - Alpha
 
 ### Added
