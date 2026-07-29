@@ -40,6 +40,34 @@ int64_t currentTimestampNs() {
     clock_gettime(CLOCK_REALTIME, &ts);
     return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + static_cast<int64_t>(ts.tv_nsec);
 }
+
+// message_received: JSON array of byte values.
+std::vector<uint8_t> decodeByteArrayPayload(const nlohmann::json& payloadValue) {
+    if (!payloadValue.is_array()) {
+        return {};
+    }
+    std::vector<uint8_t> payloadBytes;
+    payloadBytes.reserve(payloadValue.size());
+    for (const auto& val : payloadValue) {
+        if (!val.is_number_integer()) {
+            return {};
+        }
+        auto byte = val.get<int64_t>();
+        if (byte < 0 || byte > 255) {
+            return {};
+        }
+        payloadBytes.push_back(static_cast<uint8_t>(byte));
+    }
+    return payloadBytes;
+}
+
+// channel_message_received: base64 string.
+std::vector<uint8_t> decodeBase64Payload(const nlohmann::json& payloadValue) {
+    if (!payloadValue.is_string()) {
+        return {};
+    }
+    return base64Decode(payloadValue.get<std::string>());
+}
 } // namespace
 
 void DeliveryModuleImpl::start_callback(int callerRet, const char* msg, size_t len, void* userData)
@@ -88,70 +116,88 @@ void DeliveryModuleImpl::event_callback(int callerRet, const char* msg, size_t l
         std::string message(msg, len);
         fprintf(stderr, "DeliveryModuleImpl::event_callback message: %s\n", message.c_str());
 
-        nlohmann::json jsonObj;
+        // This function is a C callback invoked from the Nim runtime: a C++
+        // exception escaping here would unwind into Nim frames and terminate
+        // the process. Catch the whole nlohmann exception hierarchy (parse
+        // errors and type mismatches from .value()/.get()) and drop the event.
         try {
-            jsonObj = nlohmann::json::parse(message);
-        } catch (const nlohmann::json::parse_error&) {
-            fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid JSON\n");
-            return;
-        }
+            nlohmann::json jsonObj = nlohmann::json::parse(message);
 
-        if (!jsonObj.is_object()) {
-            fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid JSON\n");
-            return;
-        }
-
-        std::string eventType = jsonObj.value("eventType", "");
-        int64_t timestamp = currentTimestampNs();
-
-        if (eventType == "message_sent") {
-            impl->messageSent(
-                jsonObj.value("requestId", ""),
-                jsonObj.value("messageHash", ""),
-                timestamp);
-
-        } else if (eventType == "message_error") {
-            impl->messageError(
-                jsonObj.value("requestId", ""),
-                jsonObj.value("messageHash", ""),
-                jsonObj.value("error", ""),
-                timestamp);
-
-        } else if (eventType == "message_propagated") {
-            impl->messagePropagated(
-                jsonObj.value("requestId", ""),
-                jsonObj.value("messageHash", ""),
-                timestamp);
-
-        } else if (eventType == "message_received") {
-            auto msgObj = jsonObj.value("message", nlohmann::json::object());
-
-            std::string hash = jsonObj.value("messageHash", "");
-            std::string topic = msgObj.value("contentTopic", "");
-
-            std::vector<uint8_t> payloadBytes;
-            if (msgObj.contains("payload")) {
-                auto& payloadValue = msgObj["payload"];
-                if (payloadValue.is_array()) {
-                    payloadBytes.reserve(payloadValue.size());
-                    for (const auto& val : payloadValue) {
-                        payloadBytes.push_back(static_cast<uint8_t>(val.get<int>()));
-                    }
-                } else if (payloadValue.is_string()) {
-                    payloadBytes = base64Decode(payloadValue.get<std::string>());
-                }
+            if (!jsonObj.is_object()) {
+                fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid JSON\n");
+                return;
             }
 
-            int64_t msgTimestamp = static_cast<int64_t>(msgObj.value("timestamp", 0.0));
-            impl->messageReceived(hash, topic, payloadBytes, msgTimestamp);
+            std::string eventType = jsonObj.value("eventType", "");
+            int64_t timestamp = currentTimestampNs();
 
-        } else if (eventType == "connection_status_change") {
-            impl->connectionStateChanged(
-                jsonObj.value("connectionStatus", ""),
-                timestamp);
+            if (eventType == "message_sent") {
+                impl->messageSent(
+                    jsonObj.value("requestId", ""),
+                    jsonObj.value("messageHash", ""),
+                    timestamp);
 
-        } else {
-            fprintf(stderr, "DeliveryModuleImpl::event_callback: Unknown event type: %s\n", eventType.c_str());
+            } else if (eventType == "message_error") {
+                impl->messageError(
+                    jsonObj.value("requestId", ""),
+                    jsonObj.value("messageHash", ""),
+                    jsonObj.value("error", ""),
+                    timestamp);
+
+            } else if (eventType == "message_propagated") {
+                impl->messagePropagated(
+                    jsonObj.value("requestId", ""),
+                    jsonObj.value("messageHash", ""),
+                    timestamp);
+
+            } else if (eventType == "message_received") {
+                auto msgObj = jsonObj.value("message", nlohmann::json::object());
+
+                std::string hash = jsonObj.value("messageHash", "");
+                std::string topic = msgObj.value("contentTopic", "");
+
+                std::vector<uint8_t> payloadBytes;
+                if (msgObj.contains("payload")) {
+                    payloadBytes = decodeByteArrayPayload(msgObj["payload"]);
+                }
+
+                int64_t msgTimestamp = static_cast<int64_t>(msgObj.value("timestamp", 0.0));
+                impl->messageReceived(hash, topic, payloadBytes, msgTimestamp);
+
+            } else if (eventType == "connection_status_change") {
+                impl->connectionStateChanged(
+                    jsonObj.value("connectionStatus", ""),
+                    timestamp);
+
+            } else if (eventType == "channel_message_received") {
+                std::vector<uint8_t> payloadBytes;
+                if (jsonObj.contains("payload")) {
+                    payloadBytes = decodeBase64Payload(jsonObj["payload"]);
+                }
+                impl->channelMessageReceived(
+                    jsonObj.value("channelId", ""),
+                    jsonObj.value("senderId", ""),
+                    payloadBytes,
+                    timestamp);
+
+            } else if (eventType == "channel_message_sent") {
+                impl->channelMessageSent(
+                    jsonObj.value("channelId", ""),
+                    jsonObj.value("requestId", ""),
+                    timestamp);
+
+            } else if (eventType == "channel_message_error") {
+                impl->channelMessageError(
+                    jsonObj.value("channelId", ""),
+                    jsonObj.value("requestId", ""),
+                    jsonObj.value("error", ""),
+                    timestamp);
+
+            } else {
+                fprintf(stderr, "DeliveryModuleImpl::event_callback: Unknown event type: %s\n", eventType.c_str());
+            }
+        } catch (const nlohmann::json::exception& e) {
+            fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid event JSON: %s\n", e.what());
         }
     }
 }
@@ -422,6 +468,106 @@ StdLogosResult DeliveryModuleImpl::unsubscribe(const std::string& contentTopic)
     }
 
     fprintf(stderr, "DeliveryModuleImpl: Unsubscribe completed for topic: %s with success\n", contentTopic.c_str());
+    return outcome;
+}
+
+StdLogosResult DeliveryModuleImpl::channelCreate(const std::string& channelId,
+                                                 const std::string& contentTopic,
+                                                 const std::string& senderId)
+{
+    fprintf(stderr, "DeliveryModuleImpl::channelCreate called with channelId: %s, contentTopic: %s\n",
+            channelId.c_str(), contentTopic.c_str());
+
+    if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot create channel - context not initialized. Call createNode first.\n");
+        return {false, {}, "Context not initialized"};
+    }
+
+    auto outcome = callApiRetValue(
+        "channel_create",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_channel_create, deliveryCtx,
+                    channelId.c_str(), contentTopic.c_str(), senderId.c_str()));
+
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel create failed for id: %s, reason: %s\n",
+                channelId.c_str(), outcome.error.c_str());
+    }
+    return outcome;
+}
+
+StdLogosResult DeliveryModuleImpl::channelExists(const std::string& channelId)
+{
+    fprintf(stderr, "DeliveryModuleImpl::channelExists called with channelId: %s\n", channelId.c_str());
+
+    if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot query channel - context not initialized. Call createNode first.\n");
+        return {false, {}, "Context not initialized"};
+    }
+
+    auto outcome = callApiRetValue(
+        "channel_exists",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_channel_exists, deliveryCtx, channelId.c_str()));
+
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel exists failed for id: %s, reason: %s\n",
+                channelId.c_str(), outcome.error.c_str());
+    }
+    return outcome;
+}
+
+StdLogosResult DeliveryModuleImpl::channelSend(const std::string& channelId, const std::vector<uint8_t>& payload)
+{
+    fprintf(stderr, "DeliveryModuleImpl::channelSend called with channelId: %s\n", channelId.c_str());
+
+    if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot send channel message - context not initialized. Call createNode first.\n");
+        return {false, {}, "Context not initialized"};
+    }
+
+    nlohmann::json messageObj;
+    messageObj["payload"] = base64Encode(payload);
+    messageObj["ephemeral"] = false;
+
+    std::string messageJson = messageObj.dump();
+
+    auto outcome = callApiRetValue(
+        "channel_send",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_channel_send, deliveryCtx,
+                    channelId.c_str(), messageJson.c_str()));
+
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel send failed for id: %s, reason: %s\n",
+                channelId.c_str(), outcome.error.c_str());
+    }
+
+    if (outcome.success && outcome.value.is_string()) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel send initiated for id: %s, with success, requestId: %s\n",
+                channelId.c_str(), outcome.value.get<std::string>().c_str());
+    }
+    return outcome;
+}
+
+StdLogosResult DeliveryModuleImpl::channelClose(const std::string& channelId)
+{
+    fprintf(stderr, "DeliveryModuleImpl::channelClose called with channelId: %s\n", channelId.c_str());
+
+    if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot close channel - context not initialized.\n");
+        return {false, {}, "Context not initialized"};
+    }
+
+    auto outcome = callApiRetVoid(
+        "channel_close",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_channel_close, deliveryCtx, channelId.c_str()));
+
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel close failed for id: %s, reason: %s\n",
+                channelId.c_str(), outcome.error.c_str());
+    }
     return outcome;
 }
 
