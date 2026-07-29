@@ -83,6 +83,15 @@ bool waitForHeldCreateCallback()
     return false;
 }
 
+bool waitForHeldDestroyCallback()
+{
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (mock_delivery_has_held_destroy()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -399,6 +408,128 @@ LOGOS_TEST(nodeAction_stop_reports_stopping_then_settles_stopped) {
 
     mock_delivery_reset_held_callbacks();
     delete impl;
+}
+
+LOGOS_TEST(nodeAction_destroy_releases_context_and_allows_reinitialization) {
+    auto t = LogosTestContext("delivery_module");
+    t.mockCFunction("logosdelivery_create_node").returns(1);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+
+    DeliveryModuleImpl impl;
+    const json initialize = lifecycleCommand(
+        "delivery-initialize-before-destroy", "initialize",
+        {{"config", R"({"logLevel":"INFO"})"}});
+    LOGOS_ASSERT_TRUE(json::parse(impl.nodeAction(initialize.dump()))
+                          .at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(impl, "stopped", 2));
+    const json stopped = lifecycleSnapshot(impl);
+    const auto stoppedActions = stopped.at("supported_actions").get<std::vector<std::string>>();
+    LOGOS_ASSERT_EQ(stoppedActions.size(), std::size_t{2});
+    LOGOS_ASSERT_EQ(stoppedActions.at(0), std::string("start"));
+    LOGOS_ASSERT_EQ(stoppedActions.at(1), std::string("destroy"));
+
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_hold_next_destroy();
+    const json destroy = lifecycleCommandWithExpected(
+        "delivery-destroy-1", "destroy", stopped);
+    const auto startedAt = std::chrono::steady_clock::now();
+    const json acknowledgement = json::parse(impl.nodeAction(destroy.dump()));
+    const auto acknowledgementElapsed = std::chrono::steady_clock::now() - startedAt;
+
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_FALSE(acknowledgement.at("duplicate").get<bool>());
+    LOGOS_ASSERT_EQ(acknowledgement.at("state").get<std::string>(), std::string("destroying"));
+    LOGOS_ASSERT_TRUE(acknowledgementElapsed < std::chrono::seconds(1));
+    LOGOS_ASSERT_TRUE(waitForHeldDestroyCallback());
+    const json destroying = lifecycleSnapshot(impl);
+    LOGOS_ASSERT_EQ(destroying.at("state").get<std::string>(), std::string("destroying"));
+    LOGOS_ASSERT_EQ(destroying.at("pending_operation").at("operation_id").get<std::string>(),
+                    std::string("delivery-destroy-1"));
+    LOGOS_ASSERT_TRUE(destroying.at("supported_actions").empty());
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
+
+    const json duplicate = json::parse(impl.nodeAction(destroy.dump()));
+    LOGOS_ASSERT_TRUE(duplicate.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(duplicate.at("duplicate").get<bool>());
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
+
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_destroy(RET_OK, "destroyed"));
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(impl, "uninitialized", 2));
+    const json uninitialized = lifecycleSnapshot(impl);
+    LOGOS_ASSERT_EQ(uninitialized.at("state").get<std::string>(), std::string("uninitialized"));
+    LOGOS_ASSERT_EQ(uninitialized.at("supported_actions").size(), std::size_t{1});
+    LOGOS_ASSERT_EQ(uninitialized.at("supported_actions").at(0).get<std::string>(),
+                    std::string("initialize"));
+    LOGOS_ASSERT_TRUE(uninitialized.at("pending_operation").is_null());
+    LOGOS_ASSERT_EQ(uninitialized.at("last_completed_operation").at("operation_id")
+                        .get<std::string>(),
+                    std::string("delivery-destroy-1"));
+    LOGOS_ASSERT_EQ(uninitialized.at("last_completed_operation").at("outcome")
+                        .get<std::string>(),
+                    std::string("succeeded"));
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{2});
+    const json settled = lastNodeChangedEvent();
+    LOGOS_ASSERT_EQ(settled.at("phase").get<std::string>(), std::string("settled"));
+    LOGOS_ASSERT_EQ(settled.at("outcome").get<std::string>(), std::string("succeeded"));
+    LOGOS_ASSERT_EQ(settled.at("status").at("state").get<std::string>(),
+                    std::string("uninitialized"));
+
+    delivery_test_events::resetNodeLifecycleEvents();
+    const json reinitialize = lifecycleCommand(
+        "delivery-reinitialize-after-destroy", "initialize",
+        {{"config", R"({"logLevel":"INFO"})"}});
+    LOGOS_ASSERT_TRUE(json::parse(impl.nodeAction(reinitialize.dump()))
+                          .at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(impl, "stopped", 2));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_create_node"), 2);
+    mock_delivery_reset_held_callbacks();
+}
+
+LOGOS_TEST(nodeAction_destroy_failure_restores_stopped_state) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+
+    const json stopped = lifecycleSnapshot(*impl);
+    mock_delivery_hold_next_destroy();
+    const json acknowledgement = json::parse(impl->nodeAction(
+        lifecycleCommandWithExpected("delivery-destroy-failure", "destroy", stopped).dump()));
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(waitForHeldDestroyCallback());
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_destroy(
+        RET_ERR, "destroy callback included secret=not-for-lifecycle-event"));
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(*impl, "stopped", 2));
+
+    const json status = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(status.at("state").get<std::string>(), std::string("stopped"));
+    LOGOS_ASSERT_EQ(status.at("last_error").at("code").get<std::string>(),
+                    std::string("destroy_failed"));
+    LOGOS_ASSERT_EQ(status.at("last_error").at("message").get<std::string>(),
+                    std::string("Delivery destruction failed."));
+    LOGOS_ASSERT_FALSE(lastNodeChangedEvent().dump().find("secret=") != std::string::npos);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_set_event_callback"), 2);
+
+    mock_delivery_reset_held_callbacks();
+    delete impl;
+}
+
+LOGOS_TEST(nodeAction_destroy_is_a_noop_for_an_uninitialized_context) {
+    auto t = LogosTestContext("delivery_module");
+    delivery_test_events::resetNodeLifecycleEvents();
+    DeliveryModuleImpl impl;
+
+    const json acknowledgement = json::parse(impl.nodeAction(
+        lifecycleCommand("delivery-destroy-uninitialized", "destroy").dump()));
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_FALSE(acknowledgement.at("duplicate").get<bool>());
+    LOGOS_ASSERT_TRUE(acknowledgement.at("error").is_null());
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 0);
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(impl, "uninitialized", 2));
+    const json settled = lastNodeChangedEvent();
+    LOGOS_ASSERT_EQ(settled.at("phase").get<std::string>(), std::string("settled"));
+    LOGOS_ASSERT_EQ(settled.at("outcome").get<std::string>(), std::string("no_op"));
 }
 
 LOGOS_TEST(nodeAction_rejects_invalid_envelopes_without_side_effects) {

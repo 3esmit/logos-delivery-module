@@ -111,6 +111,22 @@ The delivery module provides the following API methods (all synchronous, all ret
 - `getAvailableConfigs()` - Retrieve available configuration parameter descriptions
 - `collectOpenMetricsText()` - Node metrics as OpenMetrics/Prometheus text for the `openmetrics` module (see [docs/run-node.md → Metrics](docs/run-node.md#metrics))
 
+### Managed-node lifecycle
+
+Hosts should use the versioned `nodeStatus()`, `nodeAction(request)`, and
+`nodeChanged(event)` interface for node control. The V1 action sequence is:
+
+1. `initialize` from `uninitialized`
+2. `start` from `stopped`
+3. `stop` from `running`
+4. `destroy` from `stopped`
+
+`destroy` releases the Delivery context and settles at `uninitialized`, so a
+host can initialize a new node without unloading the module. Every accepted
+action returns a correlated acknowledgement first and settles through
+`nodeChanged(event)`. Hosts must use `supported_actions` from `nodeStatus()`
+rather than infer lifecycle availability from whether a module is loaded.
+
 ### Node Configuration (`createNode`)
 
 `createNode` accepts a **flat** JSON object whose keys correspond to `WakuNodeConf`
