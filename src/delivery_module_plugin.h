@@ -24,6 +24,7 @@
  * - call @ref start before message operations
  * - use @ref subscribe / @ref send / @ref unsubscribe as needed
  * - call @ref stop before shutdown
+ * - request V1 `destroy` from the stopped state before releasing the context
  *
  * @ref createNode is synchronous. @ref start and @ref stop return once the
  * request is dispatched; completion is reported via the `nodeStarted` /
@@ -138,8 +139,9 @@ public:
      * @brief Accepts a versioned, caller-correlated lifecycle command.
      *
      * The command is a JSON object. The immediate result is only an
-     * acknowledgement; accepted asynchronous Start and Stop requests settle
-     * through nodeChanged().
+     * acknowledgement; accepted asynchronous lifecycle requests settle through
+     * nodeChanged(). `destroy` is accepted only from `stopped` and returns the
+     * context to `uninitialized` after the FFI release has completed.
      */
     std::string nodeAction(const std::string& request);
 
@@ -294,6 +296,7 @@ private:
     mutable std::mutex lifecycleMutex;
     std::mutex lifecycleWorkerMutex;
     std::thread lifecycleInitializeWorker;
+    std::thread lifecycleDestroyWorker;
     LifecycleState lifecycleState = LifecycleState::Uninitialized;
     std::uint64_t lifecycleGeneration = 0;
     std::string lifecycleInstanceId;
@@ -338,8 +341,10 @@ private:
                                       const LifecycleDispatch& dispatch);
     bool launchInitializeWorker(const std::string& cfg,
                                 const LifecycleDispatch& dispatch);
+    bool launchDestroyWorker(const LifecycleDispatch& dispatch);
     StdLogosResult startPrepared(const LifecycleDispatch& dispatch);
     StdLogosResult stopPrepared(const LifecycleDispatch& dispatch);
+    StdLogosResult destroyPrepared(const LifecycleDispatch& dispatch);
     void settleLifecycleAction(const std::string& action,
                                const std::string& operationId,
                                std::uint64_t generation,

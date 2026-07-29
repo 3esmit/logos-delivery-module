@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.10] - Alpha
+
+### Added
+
+- Support the V1 `destroy` lifecycle action for stopped Delivery contexts,
+  including correlated completion events and safe reinitialization.
+
+### Fixed
+
+- Supply the required callback when releasing a Delivery FFI context so module
+  unload performs teardown instead of being rejected by the library.
+
 ## [0.1.9] - Alpha
 
 ### Fixed

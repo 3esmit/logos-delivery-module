@@ -158,9 +158,11 @@ DeliveryModuleImpl::~DeliveryModuleImpl()
         lifecycleState = LifecycleState::Uninitialized;
     }
     std::thread initializeWorker;
+    std::thread destroyWorker;
     {
         std::lock_guard<std::mutex> lock(lifecycleWorkerMutex);
         initializeWorker = std::move(lifecycleInitializeWorker);
+        destroyWorker = std::move(lifecycleDestroyWorker);
     }
     if (initializeWorker.joinable()) {
         if (initializeWorker.get_id() == std::this_thread::get_id()) {
@@ -169,8 +171,21 @@ DeliveryModuleImpl::~DeliveryModuleImpl()
             initializeWorker.join();
         }
     }
+    if (destroyWorker.joinable()) {
+        if (destroyWorker.get_id() == std::this_thread::get_id()) {
+            destroyWorker.detach();
+        } else {
+            destroyWorker.join();
+        }
+    }
+    std::lock_guard<std::mutex> createNodeLock(createNodeMutex);
     if (deliveryCtx) {
-        logosdelivery_destroy(deliveryCtx, nullptr, nullptr);
+        // liblogosdelivery validates its callback before it tears down the FFI
+        // context. Keep destruction on the same callback path as normal calls;
+        // a null callback is rejected without releasing the context.
+        (void)callApiRetVoid(
+            "destroy", CALLBACK_TIMEOUT,
+            bindApiCall(logosdelivery_destroy, deliveryCtx));
         deliveryCtx = nullptr;
     }
 }
@@ -313,7 +328,7 @@ std::vector<std::string> DeliveryModuleImpl::lifecycleActions(LifecycleState sta
     case LifecycleState::Uninitialized:
         return {"initialize"};
     case LifecycleState::Stopped:
-        return {"start"};
+        return {"start", "destroy"};
     case LifecycleState::Running:
         return {"stop"};
     case LifecycleState::Initializing:
@@ -330,6 +345,7 @@ const char* DeliveryModuleImpl::lifecycleFailureCode(const std::string& action)
     if (action == "initialize") return "initialize_failed";
     if (action == "start") return "start_failed";
     if (action == "stop") return "stop_failed";
+    if (action == "destroy") return "destroy_failed";
     return "lifecycle_action_failed";
 }
 
@@ -338,6 +354,7 @@ const char* DeliveryModuleImpl::lifecycleFailureMessage(const std::string& actio
     if (action == "initialize") return "Delivery initialization failed.";
     if (action == "start") return "Delivery start failed.";
     if (action == "stop") return "Delivery stop failed.";
+    if (action == "destroy") return "Delivery destruction failed.";
     return "Delivery lifecycle action failed.";
 }
 
@@ -562,6 +579,18 @@ DeliveryModuleImpl::LifecycleDispatch DeliveryModuleImpl::beginLifecycleAction(
                                       "Delivery is not in a stoppable state.");
                 return dispatch;
             }
+        } else if (action == "destroy") {
+            if (lifecycleState == LifecycleState::Uninitialized) {
+                settleWithoutDispatch(LifecycleDispatchDisposition::Noop, true,
+                                      "no_op", {}, {});
+                return dispatch;
+            }
+            if (lifecycleState != LifecycleState::Stopped || deliveryCtx == nullptr) {
+                settleWithoutDispatch(LifecycleDispatchDisposition::Rejected, false,
+                                      "rejected", "invalid_state",
+                                      "Delivery must be stopped before it can be destroyed.");
+                return dispatch;
+            }
         }
     }
 
@@ -590,7 +619,8 @@ DeliveryModuleImpl::LifecycleDispatch DeliveryModuleImpl::beginLifecycleAction(
     dispatch.generation = ++lifecycleGeneration;
     if (action == "initialize") lifecycleState = LifecycleState::Initializing;
     else if (action == "start") lifecycleState = LifecycleState::Starting;
-    else lifecycleState = LifecycleState::Stopping;
+    else if (action == "stop") lifecycleState = LifecycleState::Stopping;
+    else lifecycleState = LifecycleState::Destroying;
     lifecycleError.clear();
     lifecycleErrorCode.clear();
     lifecycleErrorAtMs = 0;
@@ -823,6 +853,25 @@ bool DeliveryModuleImpl::launchInitializeWorker(
     return true;
 }
 
+bool DeliveryModuleImpl::launchDestroyWorker(const LifecycleDispatch& dispatch)
+{
+    std::lock_guard<std::mutex> lock(lifecycleWorkerMutex);
+    if (lifecycleDestroyWorker.joinable()) {
+        if (lifecycleDestroyWorker.get_id() == std::this_thread::get_id()) {
+            return false;
+        }
+        lifecycleDestroyWorker.join();
+    }
+    try {
+        lifecycleDestroyWorker = std::thread([this, dispatch] {
+            destroyPrepared(dispatch);
+        });
+    } catch (const std::system_error&) {
+        return false;
+    }
+    return true;
+}
+
 StdLogosResult DeliveryModuleImpl::startPrepared(const LifecycleDispatch& dispatch)
 {
     if (!deliveryCtx) {
@@ -863,6 +912,37 @@ StdLogosResult DeliveryModuleImpl::stopPrepared(const LifecycleDispatch& dispatc
         return result;
     }
     return {true, {}};
+}
+
+StdLogosResult DeliveryModuleImpl::destroyPrepared(const LifecycleDispatch& dispatch)
+{
+    std::lock_guard<std::mutex> createNodeLock(createNodeMutex);
+    if (!deliveryCtx) {
+        const StdLogosResult result{false, {}, "Context not initialized"};
+        settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                              dispatch.previousState, LifecycleState::Uninitialized,
+                              dispatch.previousState, false);
+        return result;
+    }
+
+    // logosdelivery_destroy joins the FFI worker and can block. This runs on a
+    // dedicated lifecycle worker so nodeAction() remains an acknowledgement-only
+    // API. The C API requires a callback and reports its terminal result there.
+    const StdLogosResult result = callApiRetVoid(
+        "destroy", CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_destroy, deliveryCtx));
+    if (result.success) {
+        deliveryCtx = nullptr;
+    } else {
+        // checkParams() temporarily associates the FFI context with the
+        // teardown callback. A failed teardown leaves the context available
+        // for retry, so restore the long-lived event recipient first.
+        logosdelivery_set_event_callback(deliveryCtx, event_callback, this);
+    }
+    settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                          dispatch.previousState, LifecycleState::Uninitialized,
+                          dispatch.previousState, result.success);
+    return result;
 }
 
 StdLogosResult DeliveryModuleImpl::createNode(const std::string& cfg)
@@ -973,7 +1053,8 @@ std::string DeliveryModuleImpl::nodeAction(const std::string& request)
         return rejected("invalid_request", "Lifecycle request requires an action.");
     }
     const std::string action = actionValue->get<std::string>();
-    if (action != "initialize" && action != "start" && action != "stop") {
+    if (action != "initialize" && action != "start" && action != "stop"
+        && action != "destroy") {
         return rejected("invalid_request", "Unsupported lifecycle action.");
     }
 
@@ -1040,8 +1121,13 @@ std::string DeliveryModuleImpl::nodeAction(const std::string& request)
         }
     } else if (action == "start") {
         startPrepared(dispatch);
-    } else {
+    } else if (action == "stop") {
         stopPrepared(dispatch);
+    } else if (!launchDestroyWorker(dispatch)) {
+        settleLifecycleAction(
+            dispatch.action, dispatch.operationId, dispatch.generation,
+            dispatch.previousState, LifecycleState::Uninitialized,
+            dispatch.previousState, false);
     }
     return dispatch.acknowledgement;
 }
@@ -1180,7 +1266,7 @@ StdLogosResult DeliveryModuleImpl::getConnectedPeersInfo()
 }
 
 std::string DeliveryModuleImpl::version() const {
-    std::string moduleVersion = "0.1.9";
+    std::string moduleVersion = "0.1.10";
     if (!deliveryCtx) {
         fprintf(stderr, "DeliveryModuleImpl: Cannot get version - context not initialized. Call createNode first.\n");
         return moduleVersion + " (liblogosdelivery version unknown, context not initialized)";
