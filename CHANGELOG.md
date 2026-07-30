@@ -11,6 +11,8 @@
 
 - Supply the required callback when releasing a Delivery FFI context so module
   unload performs teardown instead of being rejected by the library.
+- Bundle the Delivery revision that terminally closes REST and metrics listeners
+  before releasing a destroyed FFI context.
 
 ## [0.1.9] - Alpha
 
