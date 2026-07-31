@@ -207,37 +207,46 @@ void DeliveryModuleImpl::event_callback(int callerRet, const char* msg, size_t l
     }
 }
 
-// True when cfgObj already carries one of `names`. The upstream JSON conf
-// parser keys fields case-insensitively and matches either the Nim field name
-// or its CLI `name:` pragma, so a caller may legitimately spell a key several
-// ways; matching the same way keeps us from overriding their value.
-static bool containsAnyKey(const nlohmann::json& cfgObj,
-                           std::initializer_list<const char*> names)
+static std::string toLowerCopy(std::string s)
+{
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// Case-insensitive key lookup, matching keys the same way as the upstream
+// conf parser. Returns the key as spelled in the config.
+static std::optional<std::string> findKey(const nlohmann::json& cfgObj,
+                                          std::initializer_list<const char*> names)
 {
     for (const auto& entry : cfgObj.items()) {
-        std::string key = entry.key();
-        for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const std::string key = toLowerCopy(entry.key());
         for (const char* name : names) {
-            if (key == name) return true;
+            if (key == name) return entry.key();
+        }
+    }
+    return std::nullopt;
+}
+
+// True when the config is the legacy flat shape: any top-level key besides the
+// ones the layered parser consumes marks a bare WakuNodeConf field.
+static bool isFlatShape(const nlohmann::json& cfgObj)
+{
+    for (const auto& entry : cfgObj.items()) {
+        const std::string key = toLowerCopy(entry.key());
+        if (key != "entrylayer" && key != "mode" && key != "preset"
+            && key != "kernelconf" && key != "messagingoverrides"
+            && key != "channelsoverrides") {
+            return true;
         }
     }
     return false;
 }
 
-// Default every listening port (tcpPort, discv5UdpPort, restPort,
-// metricsServerPort, websocketPort) to 0 so the OS assigns an ephemeral port
-// when the caller did not pin a specific value. Caller-supplied ports are
-// preserved so fleet configs that pin ports keep working. logos-delivery now
-// accepts port 0 (status-im/nim-confutils#146), which makes this work.
-// See logos-delivery-module#18.
-//
-// Also default the node's storage directory to the per-instance path the host
-// provisions for this module. logos-delivery otherwise falls back to "./data"
-// (persistency.nim DefaultStoragePath), which is relative to the process
-// working directory and therefore identical for every instance launched from
-// it — side-by-side instances would share one SQLite file. The path is empty
-// when the module runs outside a host that provisions persistence (unit tests
-// constructing the impl directly), in which case upstream's default stands.
+// Defaults the node's storage directory to the host's per-instance path, so
+// side-by-side instances don't share upstream's cwd-relative "./data". The
+// path goes where each config shape accepts it: kernelConf when present,
+// messagingOverrides (created if needed) for the layered shapes, top level
+// for the legacy flat shape.
 static std::optional<std::string> applyConfigDefaults(const std::string& cfg,
                                                       const std::string& persistencePath)
 {
@@ -254,21 +263,29 @@ static std::optional<std::string> applyConfigDefaults(const std::string& cfg,
         return std::nullopt;
     }
 
-    for (const char* portKey : {
-             "tcpPort",
-             "discv5UdpPort",
-             "restPort",
-             "metricsServerPort",
-             "websocketPort",
-         }) {
-        if (!cfgObj.contains(portKey)) {
-            cfgObj[portKey] = 0;
+    if (!persistencePath.empty()) {
+        nlohmann::json* target = &cfgObj;
+        const auto entryLayerKey = findKey(cfgObj, {"entrylayer"});
+        const bool kernelEntry = entryLayerKey && cfgObj[*entryLayerKey].is_string()
+            && toLowerCopy(cfgObj[*entryLayerKey].get<std::string>()) == "kernel";
+        if (auto kernelConfKey = findKey(cfgObj, {"kernelconf"});
+            kernelConfKey && cfgObj[*kernelConfKey].is_object()) {
+            target = &cfgObj[*kernelConfKey];
+        } else if (kernelEntry) {
+            // Kernel entry without a kernelConf object: leave the config
+            // untouched for the parser to reject.
+            target = nullptr;
+        } else if (!isFlatShape(cfgObj)) {
+            auto overridesKey = findKey(cfgObj, {"messagingoverrides"});
+            if (!overridesKey) {
+                cfgObj["messagingOverrides"] = nlohmann::json::object();
+                overridesKey = "messagingOverrides";
+            }
+            target = cfgObj[*overridesKey].is_object() ? &cfgObj[*overridesKey] : nullptr;
         }
-    }
-
-    if (!persistencePath.empty()
-        && !containsAnyKey(cfgObj, {"localstoragepath", "local-storage-path"})) {
-        cfgObj["localStoragePath"] = persistencePath + "/data";
+        if (target && !findKey(*target, {"localstoragepath", "local-storage-path"})) {
+            (*target)["localStoragePath"] = persistencePath + "/data";
+        }
     }
 
     return cfgObj.dump();
