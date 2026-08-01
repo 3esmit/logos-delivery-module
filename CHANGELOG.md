@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0] - Alpha
+
+### Added
+
+- Reliable Channels operations and event handling, plus current Store-query
+  behavior from the Delivery module upstream.
+
+### Changed
+
+- Module metadata is the authoritative module-version source; the legacy
+  `version()` module API is removed.
+
 ## [0.1.10] - Alpha
 
 ### Added
