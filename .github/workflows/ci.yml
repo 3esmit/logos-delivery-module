@@ -100,7 +100,7 @@ jobs:
       - name: Build delivery-module (install-portable layout)
         run: |
           nix build -L .#install-portable
-          echo "LOGOS_MODULES_DIR=$PWD/result/modules" >> $GITHUB_ENV
+          echo "LOGOS_MODULES_DIR=$PWD/result/modules" >> "$GITHUB_ENV"
 
       - name: Checkout logoscore-py and build smoke image
         env:
@@ -111,13 +111,13 @@ jobs:
           cd /tmp/logoscore-py
           git checkout a58573eb2c33916c0da2ba08ecb1ceca2fbb7617
           bash tests/docker_smoke/build_smoke_image.sh
-          echo "LOGOSCORE_IMAGE=logoscore:smoke-portable" >> $GITHUB_ENV
+          echo "LOGOSCORE_IMAGE=logoscore:smoke-portable" >> "$GITHUB_ENV"
 
       - name: Build logoscore CLI binary (host PATH)
         # Must match the daemon commit baked into the smoke image above.
         run: |
           nix build -L --out-link /tmp/logoscore-cli "github:logos-co/logos-logoscore-cli/665ac28bc77f45e3c610f40fef975a12609de531#cli"
-          echo "/tmp/logoscore-cli/bin" >> $GITHUB_PATH
+          echo "/tmp/logoscore-cli/bin" >> "$GITHUB_PATH"
 
       - uses: actions/setup-python@v5
         with:
