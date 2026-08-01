@@ -9,8 +9,8 @@
 // new kernel dependency fails loudly at compile time.
 
 #pragma once
-#ifndef __liblogosdelivery_kernel__
-#define __liblogosdelivery_kernel__
+#ifndef LOGOS_DELIVERY_KERNEL_TEST_STUB_H
+#define LOGOS_DELIVERY_KERNEL_TEST_STUB_H
 
 // Shared FFICallBack typedef and RET_* return codes live in the stable header.
 #include "liblogosdelivery.h"
@@ -34,4 +34,4 @@ extern "C"
 #ifdef __cplusplus
 }
 #endif
-#endif /* __liblogosdelivery_kernel__ */
+#endif /* LOGOS_DELIVERY_KERNEL_TEST_STUB_H */

@@ -9,8 +9,8 @@
 // "channel_message_sent" and "channel_message_error" (see node_api.nim).
 
 #pragma once
-#ifndef __liblogosdelivery__
-#define __liblogosdelivery__
+#ifndef LOGOS_DELIVERY_TEST_STUB_H
+#define LOGOS_DELIVERY_TEST_STUB_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -151,4 +151,4 @@ extern "C"
 }
 #endif
 
-#endif /* __liblogosdelivery__ */
+#endif /* LOGOS_DELIVERY_TEST_STUB_H */
