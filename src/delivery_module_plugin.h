@@ -1,8 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -358,7 +361,84 @@ private:
         std::vector<std::string> events;
     };
 
+    struct EventCallbackContext {
+        std::atomic<DeliveryModuleImpl*> owner{nullptr};
+        std::atomic<bool> closing{false};
+        std::atomic<std::uint64_t> activeCallbacks{0};
+        std::mutex activeCallbacksMutex;
+        std::condition_variable activeCallbacksDrained;
+
+        DeliveryModuleImpl* acquireOwner()
+        {
+            activeCallbacks.fetch_add(1, std::memory_order_acq_rel);
+            if (closing.load(std::memory_order_acquire)) {
+                releaseCallback();
+                return nullptr;
+            }
+
+            DeliveryModuleImpl* currentOwner = owner.load(std::memory_order_acquire);
+            if (!currentOwner || closing.load(std::memory_order_acquire)) {
+                releaseCallback();
+                return nullptr;
+            }
+            return currentOwner;
+        }
+
+        void releaseCallback()
+        {
+            if (activeCallbacks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                std::lock_guard<std::mutex> lock(activeCallbacksMutex);
+                activeCallbacksDrained.notify_all();
+            }
+        }
+
+        void close()
+        {
+            closing.store(true, std::memory_order_release);
+            owner.store(nullptr, std::memory_order_release);
+        }
+
+        void waitForCallbacks()
+        {
+            std::unique_lock<std::mutex> lock(activeCallbacksMutex);
+            activeCallbacksDrained.wait(lock, [this] {
+                return activeCallbacks.load(std::memory_order_acquire) == 0;
+            });
+        }
+    };
+
+    // liblogosdelivery retains `userData` as an opaque pointer. The handle
+    // stays process-live after teardown; the registry below only exposes its
+    // associated callback context while this module instance is alive.
+    struct EventCallbackHandle {};
+
+    struct EventCallbackRegistry {
+        std::mutex mutex;
+        std::unordered_map<void*, EventCallbackContext*> contexts;
+    };
+
+    struct EventCallbackLease {
+        explicit EventCallbackLease(EventCallbackContext* context)
+            : context(context)
+        {
+        }
+
+        EventCallbackLease(const EventCallbackLease&) = delete;
+        EventCallbackLease& operator=(const EventCallbackLease&) = delete;
+
+        ~EventCallbackLease()
+        {
+            context->releaseCallback();
+        }
+
+        EventCallbackContext* context;
+    };
+
     void* deliveryCtx;
+    std::unique_ptr<EventCallbackContext> eventCallbackContext;
+    std::unique_ptr<EventCallbackHandle> eventCallbackHandle;
+    std::vector<std::uint64_t> eventListenerIds;
+    std::atomic<bool> eventListenersReady{false};
 
     std::mutex createNodeMutex;
     mutable std::mutex lifecycleMutex;
@@ -388,12 +468,22 @@ private:
      * @param callerRet FFI return code associated with callback dispatch.
      * @param msg UTF-8 JSON event payload buffer.
      * @param len Message length in bytes.
-     * @param userData Opaque pointer expected to be `DeliveryModuleImpl*`.
+     * @param userData Opaque pointer expected to be `EventCallbackHandle*`.
      */
     static void event_callback(int callerRet, const char* msg, size_t len, void* userData);
 
+    static EventCallbackRegistry& eventCallbackRegistry();
+    void registerEventCallbackContext();
+    void closeEventCallbackContext();
+    static EventCallbackContext* acquireEventCallbackContext(
+        void* userData, DeliveryModuleImpl*& owner);
+    static void retainEventCallbackHandle(std::unique_ptr<EventCallbackHandle> handle);
+
+    bool registerEventListeners();
+    bool removeEventListeners();
+
     // Completion callbacks for start()/stop(); emit nodeStarted / nodeStopped.
-    // userData is the DeliveryModuleImpl*.
+    // userData is the same guarded EventCallbackHandle used for FFI events.
     static void start_callback(int callerRet, const char* msg, size_t len, void* userData);
     static void stop_callback(int callerRet, const char* msg, size_t len, void* userData);
 

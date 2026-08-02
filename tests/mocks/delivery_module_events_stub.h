@@ -30,6 +30,9 @@ extern NodeLifecycleEvent g_lastNodeStopped;
 
 void resetNodeLifecycleEvents();
 void resetMessageReceivedEvent();
+void holdNextMessageReceivedEvent();
+bool waitForHeldMessageReceivedEvent();
+void releaseHeldMessageReceivedEvent();
 MessageReceivedEvent lastMessageReceivedEvent();
 std::size_t nodeChangedEventCount();
 std::string nodeChangedEventAt(std::size_t index);

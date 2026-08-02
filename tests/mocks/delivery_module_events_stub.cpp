@@ -10,7 +10,10 @@
 
 #include "delivery_module_plugin.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "delivery_module_events_stub.h"
@@ -23,6 +26,11 @@ std::mutex nodeChangedEventsMutex;
 std::vector<std::string> nodeChangedEvents;
 std::mutex messageReceivedEventMutex;
 MessageReceivedEvent g_lastMessageReceived;
+std::mutex heldMessageReceivedMutex;
+std::condition_variable heldMessageReceivedChanged;
+bool holdNextMessageReceived = false;
+bool messageReceivedHeld = false;
+bool releaseHeldMessageReceived = false;
 }
 
 void resetNodeLifecycleEvents()
@@ -39,6 +47,29 @@ void resetMessageReceivedEvent()
     g_lastMessageReceived = MessageReceivedEvent{};
 }
 
+void holdNextMessageReceivedEvent()
+{
+    std::lock_guard<std::mutex> lock(heldMessageReceivedMutex);
+    holdNextMessageReceived = true;
+    messageReceivedHeld = false;
+    releaseHeldMessageReceived = false;
+}
+
+bool waitForHeldMessageReceivedEvent()
+{
+    std::unique_lock<std::mutex> lock(heldMessageReceivedMutex);
+    return heldMessageReceivedChanged.wait_for(lock, std::chrono::seconds(1), [] {
+        return messageReceivedHeld;
+    });
+}
+
+void releaseHeldMessageReceivedEvent()
+{
+    std::lock_guard<std::mutex> lock(heldMessageReceivedMutex);
+    releaseHeldMessageReceived = true;
+    heldMessageReceivedChanged.notify_all();
+}
+
 MessageReceivedEvent lastMessageReceivedEvent()
 {
     std::lock_guard<std::mutex> lock(messageReceivedEventMutex);
@@ -50,6 +81,18 @@ void recordMessageReceivedEvent(const std::string& messageHash,
                                 const std::vector<uint8_t>& payload,
                                 int64_t timestamp)
 {
+    {
+        std::unique_lock<std::mutex> lock(heldMessageReceivedMutex);
+        if (holdNextMessageReceived) {
+            holdNextMessageReceived = false;
+            messageReceivedHeld = true;
+            heldMessageReceivedChanged.notify_all();
+            heldMessageReceivedChanged.wait(lock, [] {
+                return releaseHeldMessageReceived;
+            });
+            messageReceivedHeld = false;
+        }
+    }
     std::lock_guard<std::mutex> lock(messageReceivedEventMutex);
     g_lastMessageReceived = {
         messageHash,
