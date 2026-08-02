@@ -15,13 +15,20 @@
 //   t.mockCFunction("logosdelivery_start_node").returns(1);  // dispatch fails
 
 #include <logos_clib_mock.h>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #define RET_OK  0
 #define RET_ERR 1
+#define RET_STALE_WARN 3
 
 typedef void (*logosdelivery_callback)(int callerRet, const char* msg, size_t len, void* userData);
 
@@ -33,7 +40,8 @@ struct DeferredLifecycleCallback {
     void* userData = nullptr;
 };
 
-struct EventCallback {
+struct EventListener {
+    std::string eventName;
     logosdelivery_callback callback = nullptr;
     void* userData = nullptr;
 };
@@ -47,15 +55,106 @@ bool holdNextCreateCallback = false;
 bool holdNextStartCallback = false;
 bool holdNextStopCallback = false;
 bool holdNextDestroyCallback = false;
-std::mutex eventCallbackMutex;
-std::optional<EventCallback> eventCallback;
+bool failNextDestroyCallback = false;
+std::mutex rawStoreQueryResponseMutex;
+std::optional<std::string> rawStoreQueryResponse;
+std::mutex eventListenerMutex;
+std::unordered_map<std::uint64_t, EventListener> eventListeners;
+std::uint64_t nextEventListenerId = 1;
+std::size_t eventListenerRegistrationAttempt = 0;
+std::size_t eventListenerRegistrationFailureAt = 0;
+std::size_t eventListenerRemovalAttempt = 0;
+std::size_t eventListenerRemovalFailureAt = 0;
+bool failAllEventListenerRemovals = false;
+std::mutex heldEventCallbackMutex;
+std::condition_variable heldEventCallbackChanged;
+bool holdNextEventBeforeCallback = false;
+bool eventCallbackHeld = false;
+bool releaseHeldEventCallback = false;
 std::string lastCreateConfig;
+
+static bool isTerminalLifecycleCallbackResult(int callbackResult)
+{
+    return callbackResult == RET_OK || callbackResult == RET_ERR;
+}
+
+static std::string encodeCborTextPayload(const char* message, std::size_t length)
+{
+    const std::string text = message ? std::string(message, length) : std::string();
+    const std::vector<std::uint8_t> encoded = nlohmann::json::to_cbor(nlohmann::json(text));
+    return std::string(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+}
+
+static void invokeCallbackResult(int callbackResult,
+                                 logosdelivery_callback cb,
+                                 void* userData,
+                                 const char* message,
+                                 std::size_t length,
+                                 bool encodeOkPayload = true)
+{
+    if (!cb) return;
+
+    if (callbackResult == RET_OK && encodeOkPayload) {
+        const std::string encoded = encodeCborTextPayload(message, length);
+        cb(callbackResult, encoded.data(), encoded.size(), userData);
+        return;
+    }
+
+    cb(callbackResult, message ? message : "", message ? length : 0, userData);
+}
+
+static bool completeHeldLifecycleCallback(std::optional<DeferredLifecycleCallback>& held,
+                                          int callbackResult,
+                                          const char* message,
+                                          std::size_t length,
+                                          bool encodeOkPayload = true)
+{
+    DeferredLifecycleCallback deferred;
+    {
+        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+        if (!held) return false;
+        deferred = *held;
+        if (isTerminalLifecycleCallbackResult(callbackResult)) {
+            held.reset();
+        }
+    }
+    if (!deferred.callback) return false;
+
+    invokeCallbackResult(callbackResult, deferred.callback, deferred.userData,
+                         message, length, encodeOkPayload);
+    return true;
+}
 
 // Helper: invoke callback with RET_OK and the string configured in the mock store.
 static void invokeOk(const char* funcName, logosdelivery_callback cb, void* userData) {
-    if (!cb) return;
     const char* msg = LogosCMockStore::instance().getReturnString(funcName);
-    cb(RET_OK, msg ? msg : "", msg ? strlen(msg) : 0, userData);
+    invokeCallbackResult(RET_OK, cb, userData, msg ? msg : "", msg ? std::strlen(msg) : 0);
+}
+
+static const char* eventNameForPayload(const std::string& eventJson) {
+    const std::string eventTypeKey = "\"eventType\"";
+    const std::size_t keyPos = eventJson.find(eventTypeKey);
+    if (keyPos == std::string::npos) return nullptr;
+
+    const std::size_t colonPos = eventJson.find(':', keyPos + eventTypeKey.size());
+    if (colonPos == std::string::npos) return nullptr;
+
+    const std::size_t valueStart = eventJson.find('"', colonPos + 1);
+    if (valueStart == std::string::npos) return nullptr;
+
+    const std::size_t valueEnd = eventJson.find('"', valueStart + 1);
+    if (valueEnd == std::string::npos) return nullptr;
+
+    const std::string eventType = eventJson.substr(valueStart + 1, valueEnd - valueStart - 1);
+    if (eventType == "message_sent") return "onMessageSent";
+    if (eventType == "message_error") return "onMessageError";
+    if (eventType == "message_propagated") return "onMessagePropagated";
+    if (eventType == "message_received") return "onMessageReceived";
+    if (eventType == "connection_status_change") return "onConnectionStatusChange";
+    if (eventType == "channel_message_received") return "onChannelMessageReceived";
+    if (eventType == "channel_message_sent") return "onChannelMessageSent";
+    if (eventType == "channel_message_error") return "onChannelMessageError";
+    return nullptr;
 }
 
 extern "C" {
@@ -63,7 +162,7 @@ extern "C" {
 void* logosdelivery_create_node(const char* cfg, logosdelivery_callback cb, void* userData) {
     LOGOS_CMOCK_RECORD("logosdelivery_create_node");
     {
-        std::lock_guard<std::mutex> lock(eventCallbackMutex);
+        std::lock_guard<std::mutex> lock(eventListenerMutex);
         lastCreateConfig = cfg ? cfg : "";
     }
     int ok = LOGOS_CMOCK_RETURN(int, "logosdelivery_create_node");
@@ -81,10 +180,35 @@ void* logosdelivery_create_node(const char* cfg, logosdelivery_callback cb, void
     return ok ? static_cast<void*>(&s_fakeCtx) : nullptr;
 }
 
-void logosdelivery_set_event_callback(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
-    LOGOS_CMOCK_RECORD("logosdelivery_set_event_callback");
-    std::lock_guard<std::mutex> lock(eventCallbackMutex);
-    eventCallback = EventCallback{cb, userData};
+std::uint64_t logosdelivery_add_event_listener(
+    void* ctx, const char* eventName, logosdelivery_callback cb, void* userData) {
+    LOGOS_CMOCK_RECORD("logosdelivery_add_event_listener");
+    if (!ctx || !eventName || !cb) return 0;
+
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
+    ++eventListenerRegistrationAttempt;
+    if (eventListenerRegistrationFailureAt != 0
+        && eventListenerRegistrationAttempt == eventListenerRegistrationFailureAt) {
+        return 0;
+    }
+
+    const std::uint64_t listenerId = nextEventListenerId++;
+    eventListeners.emplace(listenerId, EventListener{eventName, cb, userData});
+    return listenerId;
+}
+
+int logosdelivery_remove_event_listener(void* ctx, std::uint64_t listenerId) {
+    LOGOS_CMOCK_RECORD("logosdelivery_remove_event_listener");
+    if (!ctx) return RET_ERR;
+
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
+    ++eventListenerRemovalAttempt;
+    if (failAllEventListenerRemovals
+        || (eventListenerRemovalFailureAt != 0
+            && eventListenerRemovalAttempt == eventListenerRemovalFailureAt)) {
+        return RET_ERR;
+    }
+    return eventListeners.erase(listenerId) == 1 ? RET_OK : RET_ERR;
 }
 
 int logosdelivery_destroy(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
@@ -95,8 +219,18 @@ int logosdelivery_destroy(void* /*ctx*/, logosdelivery_callback cb, void* userDa
         if (holdNextDestroyCallback) {
             holdNextDestroyCallback = false;
             deferredDestroyCallback = DeferredLifecycleCallback{cb, userData};
+        } else if (failNextDestroyCallback) {
+            failNextDestroyCallback = false;
+            const char* message = "mock: destroy callback fail";
+            if (cb) {
+                cb(RET_ERR, message, std::strlen(message), userData);
+            }
+            return RET_ERR;
         } else {
             invokeOk("logosdelivery_destroy", cb, userData);
+            std::lock_guard<std::mutex> eventLock(eventListenerMutex);
+            eventListeners.clear();
+            nextEventListenerId = 1;
         }
     }
     return dispatch;
@@ -158,9 +292,20 @@ int waku_store_query(void* /*ctx*/, logosdelivery_callback cb, void* userData,
     int dispatch = LOGOS_CMOCK_RETURN(int, "waku_store_query_dispatch");
     if (dispatch == RET_OK) {
         int callbackResult = LOGOS_CMOCK_RETURN(int, "waku_store_query_callback_result");
-        const char* response = LogosCMockStore::instance().getReturnString("waku_store_query");
-        if (cb) {
-            cb(callbackResult, response ? response : "", response ? strlen(response) : 0, userData);
+        std::optional<std::string> rawResponse;
+        {
+            std::lock_guard<std::mutex> lock(rawStoreQueryResponseMutex);
+            rawResponse = rawStoreQueryResponse;
+        }
+        if (rawResponse) {
+            invokeCallbackResult(callbackResult, cb, userData,
+                                 rawResponse->data(), rawResponse->size(), false);
+        } else {
+            const char* response = LogosCMockStore::instance().getReturnString(
+                "waku_store_query");
+            invokeCallbackResult(callbackResult, cb, userData,
+                                 response ? response : "",
+                                 response ? std::strlen(response) : 0);
         }
     }
     return dispatch;
@@ -174,10 +319,9 @@ int waku_get_connected_peers_info(void* /*ctx*/, logosdelivery_callback cb, void
             int, "waku_get_connected_peers_info_callback_result");
         const char* response = LogosCMockStore::instance().getReturnString(
             "waku_get_connected_peers_info");
-        if (cb) {
-            cb(callbackResult, response ? response : "", response ? strlen(response) : 0,
-               userData);
-        }
+        invokeCallbackResult(callbackResult, cb, userData,
+                             response ? response : "",
+                             response ? std::strlen(response) : 0);
     }
     return dispatch;
 }
@@ -252,64 +396,61 @@ extern "C" void mock_delivery_hold_next_destroy()
     holdNextDestroyCallback = true;
 }
 
+extern "C" void mock_delivery_fail_next_destroy_callback()
+{
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    failNextDestroyCallback = true;
+}
+
 extern "C" bool mock_delivery_complete_held_start(int callbackResult, const char* message)
 {
-    std::optional<DeferredLifecycleCallback> deferred;
-    {
-        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
-        if (!deferredStartCallback) return false;
-        deferred = std::move(deferredStartCallback);
-        deferredStartCallback.reset();
-    }
-    if (!deferred->callback) return false;
-    const std::size_t length = message ? std::strlen(message) : 0;
-    deferred->callback(callbackResult, message ? message : "", length, deferred->userData);
-    return true;
+    return completeHeldLifecycleCallback(
+        deferredStartCallback, callbackResult, message, message ? std::strlen(message) : 0);
 }
 
 extern "C" bool mock_delivery_complete_held_stop(int callbackResult, const char* message)
 {
-    std::optional<DeferredLifecycleCallback> deferred;
-    {
-        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
-        if (!deferredStopCallback) return false;
-        deferred = std::move(deferredStopCallback);
-        deferredStopCallback.reset();
-    }
-    if (!deferred->callback) return false;
-    const std::size_t length = message ? std::strlen(message) : 0;
-    deferred->callback(callbackResult, message ? message : "", length, deferred->userData);
-    return true;
+    return completeHeldLifecycleCallback(
+        deferredStopCallback, callbackResult, message, message ? std::strlen(message) : 0);
 }
 
 extern "C" bool mock_delivery_complete_held_create(int callbackResult, const char* message)
 {
-    std::optional<DeferredLifecycleCallback> deferred;
-    {
-        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
-        if (!deferredCreateCallback) return false;
-        deferred = std::move(deferredCreateCallback);
-        deferredCreateCallback.reset();
-    }
-    if (!deferred->callback) return false;
-    const std::size_t length = message ? std::strlen(message) : 0;
-    deferred->callback(callbackResult, message ? message : "", length, deferred->userData);
-    return true;
+    return completeHeldLifecycleCallback(
+        deferredCreateCallback, callbackResult, message, message ? std::strlen(message) : 0);
 }
 
 extern "C" bool mock_delivery_complete_held_destroy(int callbackResult, const char* message)
 {
-    std::optional<DeferredLifecycleCallback> deferred;
-    {
-        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
-        if (!deferredDestroyCallback) return false;
-        deferred = std::move(deferredDestroyCallback);
-        deferredDestroyCallback.reset();
+    const bool completed = completeHeldLifecycleCallback(
+        deferredDestroyCallback, callbackResult, message, message ? std::strlen(message) : 0);
+    if (!completed) return false;
+    if (callbackResult == RET_OK) {
+        std::lock_guard<std::mutex> lock(eventListenerMutex);
+        eventListeners.clear();
+        nextEventListenerId = 1;
     }
-    if (!deferred->callback) return false;
-    const std::size_t length = message ? std::strlen(message) : 0;
-    deferred->callback(callbackResult, message ? message : "", length, deferred->userData);
     return true;
+}
+
+extern "C" bool mock_delivery_complete_held_start_raw(int callbackResult,
+                                                        const char* payload,
+                                                        std::size_t payloadSize)
+{
+    return completeHeldLifecycleCallback(
+        deferredStartCallback, callbackResult, payload, payloadSize, false);
+}
+
+extern "C" bool mock_delivery_has_held_start()
+{
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    return deferredStartCallback.has_value();
+}
+
+extern "C" bool mock_delivery_has_held_stop()
+{
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    return deferredStopCallback.has_value();
 }
 
 extern "C" bool mock_delivery_has_held_create()
@@ -335,28 +476,136 @@ extern "C" void mock_delivery_reset_held_callbacks()
     holdNextStartCallback = false;
     holdNextStopCallback = false;
     holdNextDestroyCallback = false;
+    failNextDestroyCallback = false;
+}
+
+extern "C" void mock_delivery_fail_event_listener_registration_at(std::size_t attempt)
+{
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
+    eventListenerRegistrationAttempt = 0;
+    eventListenerRegistrationFailureAt = attempt;
+}
+
+extern "C" void mock_delivery_fail_event_listener_removal_at(std::size_t attempt)
+{
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
+    eventListenerRemovalAttempt = 0;
+    eventListenerRemovalFailureAt = attempt;
+    failAllEventListenerRemovals = false;
+}
+
+extern "C" void mock_delivery_fail_all_event_listener_removals()
+{
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
+    eventListenerRemovalAttempt = 0;
+    eventListenerRemovalFailureAt = 0;
+    failAllEventListenerRemovals = true;
+}
+
+extern "C" std::size_t mock_delivery_event_listener_count()
+{
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
+    return eventListeners.size();
+}
+
+extern "C" void mock_delivery_reset_event_listeners()
+{
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
+    eventListeners.clear();
+    nextEventListenerId = 1;
+    eventListenerRegistrationAttempt = 0;
+    eventListenerRegistrationFailureAt = 0;
+    eventListenerRemovalAttempt = 0;
+    eventListenerRemovalFailureAt = 0;
+    failAllEventListenerRemovals = false;
+}
+
+extern "C" bool mock_delivery_has_event_listener(const char* eventName)
+{
+    if (!eventName) return false;
+
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
+    for (const auto& entry : eventListeners) {
+        if (entry.second.eventName == eventName) return true;
+    }
+    return false;
 }
 
 extern "C" const char* mock_delivery_last_create_config()
 {
     static thread_local std::string config;
-    std::lock_guard<std::mutex> lock(eventCallbackMutex);
+    std::lock_guard<std::mutex> lock(eventListenerMutex);
     config = lastCreateConfig;
     return config.c_str();
 }
 
 extern "C" bool mock_delivery_emit_event(int callerResult, const char* eventJson)
 {
-    EventCallback callback;
+    const std::string event = eventJson ? eventJson : "";
+    const char* eventName = eventNameForPayload(event);
+    if (!eventName) return false;
+
+    std::vector<EventListener> listeners;
     {
-        std::lock_guard<std::mutex> lock(eventCallbackMutex);
-        if (!eventCallback || !eventCallback->callback) {
-            return false;
+        std::lock_guard<std::mutex> lock(eventListenerMutex);
+        for (const auto& entry : eventListeners) {
+            if (entry.second.eventName == eventName && entry.second.callback) {
+                listeners.push_back(entry.second);
+            }
         }
-        callback = *eventCallback;
     }
 
-    const std::string event = eventJson ? eventJson : "";
-    callback.callback(callerResult, event.c_str(), event.size(), callback.userData);
+    if (listeners.empty()) return false;
+    {
+        std::unique_lock<std::mutex> lock(heldEventCallbackMutex);
+        if (holdNextEventBeforeCallback) {
+            holdNextEventBeforeCallback = false;
+            eventCallbackHeld = true;
+            heldEventCallbackChanged.notify_all();
+            heldEventCallbackChanged.wait(lock, [] {
+                return releaseHeldEventCallback;
+            });
+            eventCallbackHeld = false;
+        }
+    }
+    for (const auto& listener : listeners) {
+        listener.callback(callerResult, event.c_str(), event.size(), listener.userData);
+    }
     return true;
+}
+
+extern "C" void mock_delivery_hold_next_event_before_callback()
+{
+    std::lock_guard<std::mutex> lock(heldEventCallbackMutex);
+    holdNextEventBeforeCallback = true;
+    eventCallbackHeld = false;
+    releaseHeldEventCallback = false;
+}
+
+extern "C" bool mock_delivery_wait_for_held_event_before_callback()
+{
+    std::unique_lock<std::mutex> lock(heldEventCallbackMutex);
+    return heldEventCallbackChanged.wait_for(lock, std::chrono::seconds(1), [] {
+        return eventCallbackHeld;
+    });
+}
+
+extern "C" void mock_delivery_release_held_event_before_callback()
+{
+    std::lock_guard<std::mutex> lock(heldEventCallbackMutex);
+    releaseHeldEventCallback = true;
+    heldEventCallbackChanged.notify_all();
+}
+
+extern "C" void mock_delivery_set_raw_store_query_response(const char* payload,
+                                                            std::size_t payloadSize)
+{
+    std::lock_guard<std::mutex> lock(rawStoreQueryResponseMutex);
+    rawStoreQueryResponse = payload ? std::string(payload, payloadSize) : std::string();
+}
+
+extern "C" void mock_delivery_clear_raw_store_query_response()
+{
+    std::lock_guard<std::mutex> lock(rawStoreQueryResponseMutex);
+    rawStoreQueryResponse.reset();
 }

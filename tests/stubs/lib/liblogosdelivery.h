@@ -1,5 +1,5 @@
 // Stub header for liblogosdelivery - mirrors library/liblogosdelivery.h from
-// logos-delivery (master 8ad99f1) so that delivery_module_plugin.cpp compiles
+// logos-delivery (master 5e625eb) so that delivery_module_plugin.cpp compiles
 // during unit tests without the real library. Keep in sync with the real,
 // Nim-build-generated header when bumping the logos-delivery flake input.
 //
@@ -19,6 +19,8 @@
 #define RET_OK 0
 #define RET_ERR 1
 #define RET_MISSING_CALLBACK 2
+// Callback-only progress notification; never a terminal request result.
+#define RET_STALE_WARN 3
 
 #ifdef __cplusplus
 extern "C"
@@ -117,15 +119,19 @@ extern "C"
                           void *userData,
                           const char *channelId);
 
-  // Channel lifecycle events are delivered through the event callback set via
-  // logosdelivery_set_event_callback: "onChannelMessageReceived" (payload
-  // base64-encoded), "onChannelMessageSent", "onChannelMessageError".
+  // Channel lifecycle events use per-event listeners: "onChannelMessageReceived"
+  // (payload base64-encoded), "onChannelMessageSent", "onChannelMessageError".
 
-  // Sets a callback that will be invoked whenever an event occurs.
-  // It is crucial that the passed callback is fast, non-blocking and potentially thread-safe.
-  void logosdelivery_set_event_callback(void *ctx,
+  // Registers a callback for one named event. Returns a non-zero listener id
+  // on success, or zero for an invalid context or callback.
+  uint64_t logosdelivery_add_event_listener(void *ctx,
+                                 const char *eventName,
                                  FFICallBack callback,
                                  void *userData);
+
+  // Removes a previously registered event listener. Returns RET_OK on success.
+  int logosdelivery_remove_event_listener(void *ctx,
+                                 uint64_t listenerId);
 
   // Retrieves the list of available node info IDs.
   int logosdelivery_get_available_node_info_ids(void *ctx,

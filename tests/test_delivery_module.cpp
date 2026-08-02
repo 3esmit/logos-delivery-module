@@ -3,8 +3,10 @@
 // Mocks invoke callbacks synchronously so the semaphore inside api_call_handler.h
 // is released before try_acquire_for starts waiting.
 
+#include <atomic>
 #include <climits>
 #include <chrono>
+#include <cstdint>
 #include <limits>
 #include <thread>
 
@@ -21,6 +23,16 @@ namespace {
 
 constexpr const char* kLifecycleCommandSchema =
     "logos.managed_node_lifecycle.command";
+constexpr const char* kDeliveryEventNames[] = {
+    "onMessageSent",
+    "onMessageError",
+    "onMessagePropagated",
+    "onMessageReceived",
+    "onConnectionStatusChange",
+    "onChannelMessageReceived",
+    "onChannelMessageSent",
+    "onChannelMessageError",
+};
 
 json lifecycleSnapshot(DeliveryModuleImpl& impl)
 {
@@ -97,6 +109,14 @@ bool waitForHeldDestroyCallback()
     return false;
 }
 
+void assertDeliveryEventListenersRegistered()
+{
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{8});
+    for (const char* eventName : kDeliveryEventNames) {
+        LOGOS_ASSERT_TRUE(mock_delivery_has_event_listener(eventName));
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -118,7 +138,8 @@ LOGOS_TEST(createNode_succeeds_when_ffi_returns_non_null_context) {
     DeliveryModuleImpl impl;
     LOGOS_ASSERT_TRUE(impl.createNode(R"({"logLevel":"INFO"})").success);
     LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_create_node"));
-    LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_set_event_callback"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 8);
+    assertDeliveryEventListenersRegistered();
 }
 
 LOGOS_TEST(createNode_fails_when_ffi_returns_null) {
@@ -128,6 +149,71 @@ LOGOS_TEST(createNode_fails_when_ffi_returns_null) {
     DeliveryModuleImpl impl;
     LOGOS_ASSERT_FALSE(impl.createNode(R"({"logLevel":"INFO"})").success);
     LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_create_node"));
+}
+
+LOGOS_TEST(createNode_cleans_up_partial_event_listener_registration_failure) {
+    auto t = LogosTestContext("delivery_module");
+    t.mockCFunction("logosdelivery_create_node").returns(1);
+    mock_delivery_fail_event_listener_registration_at(3);
+
+    DeliveryModuleImpl impl;
+    const StdLogosResult result = impl.createNode(R"({"logLevel":"INFO"})");
+    LOGOS_ASSERT_FALSE(result.success);
+    LOGOS_ASSERT_EQ(result.error, std::string("Failed to register Delivery event listeners"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 3);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 2);
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
+
+    mock_delivery_fail_event_listener_registration_at(0);
+}
+
+LOGOS_TEST(createNode_recovers_after_listener_cleanup_destroy_failure) {
+    auto t = LogosTestContext("delivery_module");
+    t.mockCFunction("logosdelivery_create_node").returns(1);
+    mock_delivery_fail_event_listener_registration_at(3);
+    mock_delivery_fail_next_destroy_callback();
+
+    DeliveryModuleImpl impl;
+    LOGOS_ASSERT_TRUE(impl.createNode(R"({"logLevel":"INFO"})").success);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 11);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 2);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
+    assertDeliveryEventListenersRegistered();
+    LOGOS_ASSERT_EQ(lifecycleSnapshot(impl).at("state").get<std::string>(),
+                    std::string("stopped"));
+
+    mock_delivery_fail_event_listener_registration_at(0);
+}
+
+LOGOS_TEST(createNode_listener_rollback_failure_allows_only_destroy_until_recovered) {
+    auto t = LogosTestContext("delivery_module");
+    t.mockCFunction("logosdelivery_create_node").returns(1);
+    mock_delivery_fail_event_listener_registration_at(3);
+    mock_delivery_fail_event_listener_removal_at(1);
+
+    DeliveryModuleImpl impl;
+    const StdLogosResult createResult = impl.createNode(R"({"logLevel":"INFO"})");
+    LOGOS_ASSERT_FALSE(createResult.success);
+    LOGOS_ASSERT_EQ(createResult.error,
+                    std::string("Failed to remove partially registered Delivery event listeners"));
+    const json dirty = lifecycleSnapshot(impl);
+    LOGOS_ASSERT_EQ(dirty.at("state").get<std::string>(), std::string("stopped"));
+    LOGOS_ASSERT_EQ(dirty.at("supported_actions").size(), std::size_t{1});
+    LOGOS_ASSERT_EQ(dirty.at("supported_actions").at(0).get<std::string>(),
+                    std::string("destroy"));
+    LOGOS_ASSERT_FALSE(impl.start().success);
+
+    mock_delivery_fail_event_listener_registration_at(0);
+    mock_delivery_fail_event_listener_removal_at(0);
+    delivery_test_events::resetNodeLifecycleEvents();
+    const json destroyAcknowledgement = json::parse(impl.nodeAction(
+        lifecycleCommandWithExpected("delivery-destroy-rollback-recovery", "destroy", dirty).dump()));
+    LOGOS_ASSERT_TRUE(destroyAcknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(impl, "uninitialized", 2));
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
+
+    LOGOS_ASSERT_TRUE(impl.createNode(R"({"logLevel":"INFO"})").success);
 }
 
 LOGOS_TEST(createNode_tracks_call_count) {
@@ -146,7 +232,136 @@ LOGOS_TEST(createNode_succeeds_with_logos_dev_preset_config) {
     DeliveryModuleImpl impl;
     LOGOS_ASSERT_TRUE(impl.createNode(R"({"logLevel":"DEBUG","mode":"Core","preset":"logos.dev"})").success);
     LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_create_node"));
-    LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_set_event_callback"));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 8);
+    assertDeliveryEventListenersRegistered();
+}
+
+LOGOS_TEST(destructor_removes_event_listeners_before_teardown) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    assertDeliveryEventListenersRegistered();
+
+    delete impl;
+
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 8);
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
+}
+
+LOGOS_TEST(destructor_retries_transient_listener_removal_before_failed_teardown) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetMessageReceivedEvent();
+    mock_delivery_fail_event_listener_removal_at(4);
+    mock_delivery_fail_next_destroy_callback();
+
+    delete impl;
+
+    const char* event = R"({"eventType":"message_received","messageHash":"late","message":{"contentTopic":"/test/1/delivery/proto","payload":[1],"timestamp":1}})";
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 9);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
+    LOGOS_ASSERT_FALSE(mock_delivery_emit_event(RET_OK, event));
+    LOGOS_ASSERT_FALSE(delivery_test_events::lastMessageReceivedEvent().fired);
+}
+
+LOGOS_TEST(destructor_limits_persistent_listener_removal_to_one_retry) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    mock_delivery_fail_all_event_listener_removals();
+
+    delete impl;
+
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 16);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
+
+    mock_delivery_fail_event_listener_removal_at(0);
+}
+
+LOGOS_TEST(destructor_waits_for_an_in_flight_event_callback) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetMessageReceivedEvent();
+    delivery_test_events::holdNextMessageReceivedEvent();
+    std::atomic<bool> eventDelivered{false};
+    std::atomic<bool> destroyed{false};
+    const char* event = R"({"eventType":"message_received","messageHash":"in-flight","message":{"contentTopic":"/test/1/delivery/proto","payload":[1],"timestamp":1}})";
+
+    std::thread eventThread([&] {
+        eventDelivered.store(mock_delivery_emit_event(RET_OK, event));
+    });
+    const bool eventHeld = delivery_test_events::waitForHeldMessageReceivedEvent();
+    if (!eventHeld) {
+        delivery_test_events::releaseHeldMessageReceivedEvent();
+        eventThread.join();
+        LOGOS_ASSERT_TRUE(eventHeld);
+        return;
+    }
+
+    std::thread destroyThread([&] {
+        delete impl;
+        destroyed.store(true);
+    });
+    bool teardownReachedDrain = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (mock_delivery_event_listener_count() == 0) {
+            teardownReachedDrain = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const bool destructorWaited = teardownReachedDrain && !destroyed.load();
+
+    delivery_test_events::releaseHeldMessageReceivedEvent();
+    eventThread.join();
+    destroyThread.join();
+    LOGOS_ASSERT_TRUE(destructorWaited);
+    LOGOS_ASSERT_TRUE(eventDelivered.load());
+    LOGOS_ASSERT_TRUE(destroyed.load());
+}
+
+LOGOS_TEST(destructor_drops_an_event_dispatched_before_callback_entry) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetMessageReceivedEvent();
+    mock_delivery_hold_next_event_before_callback();
+    std::atomic<bool> eventDelivered{false};
+    const char* event = R"({"eventType":"message_received","messageHash":"queued","message":{"contentTopic":"/test/1/delivery/proto","payload":[1],"timestamp":1}})";
+
+    std::thread eventThread([&] {
+        eventDelivered.store(mock_delivery_emit_event(RET_OK, event));
+    });
+    const bool eventHeld = mock_delivery_wait_for_held_event_before_callback();
+    if (!eventHeld) {
+        mock_delivery_release_held_event_before_callback();
+        eventThread.join();
+        LOGOS_ASSERT_TRUE(eventHeld);
+        return;
+    }
+
+    delete impl;
+    mock_delivery_release_held_event_before_callback();
+    eventThread.join();
+
+    LOGOS_ASSERT_TRUE(eventDelivered.load());
+    LOGOS_ASSERT_FALSE(delivery_test_events::lastMessageReceivedEvent().fired);
+}
+
+LOGOS_TEST(destructor_drops_a_queued_start_completion_callback) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+
+    mock_delivery_hold_next_start();
+    LOGOS_ASSERT_TRUE(impl->start().success);
+    LOGOS_ASSERT_TRUE(mock_delivery_has_held_start());
+
+    delete impl;
+
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_start(RET_OK, "started"));
+    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStarted.fired);
+    mock_delivery_reset_held_callbacks();
 }
 
 LOGOS_TEST(createNode_defaults_flat_raw_ports_to_ephemeral) {
@@ -302,13 +517,19 @@ LOGOS_TEST(start_emits_node_started_event) {
     auto t = LogosTestContext("delivery_module");
     delivery_test_events::resetNodeLifecycleEvents();
     auto* impl = createInitializedImpl(t);
+    mock_delivery_reset_held_callbacks();
+    mock_delivery_hold_next_start();
 
-    // Dispatch succeeds; the mock fires the completion callback synchronously,
-    // so the nodeStarted event is observable right after start() returns.
+    // Dispatch succeeds; the controlled callback carries CBOR text and is
+    // decoded before the event reaches the host.
     LOGOS_ASSERT_TRUE(impl->start().success);
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_start(RET_OK, "node started"));
     LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.fired);
     LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.success);
+    LOGOS_ASSERT_EQ(delivery_test_events::g_lastNodeStarted.message,
+                    std::string("node started"));
 
+    mock_delivery_reset_held_callbacks();
     delete impl;
 }
 
@@ -401,6 +622,16 @@ LOGOS_TEST(nodeAction_initializes_with_v1_acknowledgement_and_events) {
     LOGOS_ASSERT_EQ(pending.at("state").get<std::string>(), std::string("initializing"));
     LOGOS_ASSERT_EQ(pending.at("pending_operation").at("operation_id").get<std::string>(),
                     std::string("delivery-initialize-1"));
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_create(
+        RET_STALE_WARN, "initialization still in progress"));
+    LOGOS_ASSERT_TRUE(mock_delivery_has_held_create());
+    const json warningPending = lifecycleSnapshot(impl);
+    LOGOS_ASSERT_EQ(warningPending.at("state").get<std::string>(),
+                    std::string("initializing"));
+    LOGOS_ASSERT_EQ(warningPending.at("pending_operation").at("operation_id").get<std::string>(),
+                    std::string("delivery-initialize-1"));
+    LOGOS_ASSERT_TRUE(warningPending.at("last_error").is_null());
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{1});
     LOGOS_ASSERT_TRUE(mock_delivery_complete_held_create(RET_OK, "created"));
     LOGOS_ASSERT_TRUE(waitForLifecycleState(impl, "stopped", 2));
     LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_create_node"));
@@ -460,6 +691,16 @@ LOGOS_TEST(nodeAction_start_is_idempotent_while_callback_is_pending) {
     LOGOS_ASSERT_EQ(pendingStatus.at("state").get<std::string>(), std::string("starting"));
     LOGOS_ASSERT_EQ(pendingStatus.at("pending_operation").at("operation_id").get<std::string>(),
                     std::string("delivery-start-1"));
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_start(
+        RET_STALE_WARN, "start still in progress"));
+    LOGOS_ASSERT_TRUE(mock_delivery_has_held_start());
+    const json warningPending = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(warningPending.at("state").get<std::string>(), std::string("starting"));
+    LOGOS_ASSERT_EQ(warningPending.at("pending_operation").at("operation_id").get<std::string>(),
+                    std::string("delivery-start-1"));
+    LOGOS_ASSERT_TRUE(warningPending.at("last_error").is_null());
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{1});
+    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStarted.fired);
 
     const json conflicting = json::parse(impl->nodeAction(
         lifecycleCommand("delivery-start-2", "start").dump()));
@@ -500,6 +741,16 @@ LOGOS_TEST(nodeAction_stop_reports_stopping_then_settles_stopped) {
     LOGOS_ASSERT_EQ(lifecycleSnapshot(*impl).at("state").get<std::string>(),
                     std::string("stopping"));
     LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_stop_node"), 1);
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_stop(
+        RET_STALE_WARN, "stop still in progress"));
+    LOGOS_ASSERT_TRUE(mock_delivery_has_held_stop());
+    const json warningPending = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(warningPending.at("state").get<std::string>(), std::string("stopping"));
+    LOGOS_ASSERT_EQ(warningPending.at("pending_operation").at("operation_id").get<std::string>(),
+                    std::string("delivery-stop-1"));
+    LOGOS_ASSERT_TRUE(warningPending.at("last_error").is_null());
+    LOGOS_ASSERT_EQ(delivery_test_events::nodeChangedEventCount(), std::size_t{1});
+    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStopped.fired);
 
     LOGOS_ASSERT_TRUE(mock_delivery_complete_held_stop(RET_OK, "stopped"));
     const json stopped = lifecycleSnapshot(*impl);
@@ -615,9 +866,42 @@ LOGOS_TEST(nodeAction_destroy_failure_restores_stopped_state) {
     LOGOS_ASSERT_EQ(status.at("last_error").at("message").get<std::string>(),
                     std::string("Delivery destruction failed."));
     LOGOS_ASSERT_FALSE(lastNodeChangedEvent().dump().find("secret=") != std::string::npos);
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_set_event_callback"), 2);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 16);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 8);
+    assertDeliveryEventListenersRegistered();
 
     mock_delivery_reset_held_callbacks();
+    delete impl;
+}
+
+LOGOS_TEST(nodeAction_destroy_listener_removal_failure_is_retryable_without_duplicates) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_fail_event_listener_removal_at(3);
+
+    const json stopped = lifecycleSnapshot(*impl);
+    const json firstAcknowledgement = json::parse(impl->nodeAction(
+        lifecycleCommandWithExpected("delivery-destroy-listener-removal-1", "destroy", stopped).dump()));
+    LOGOS_ASSERT_TRUE(firstAcknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(*impl, "stopped", 2));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 8);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 8);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 0);
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{1});
+
+    mock_delivery_fail_event_listener_removal_at(0);
+    delivery_test_events::resetNodeLifecycleEvents();
+    const json retryStopped = lifecycleSnapshot(*impl);
+    const json retryAcknowledgement = json::parse(impl->nodeAction(
+        lifecycleCommandWithExpected("delivery-destroy-listener-removal-2", "destroy", retryStopped).dump()));
+    LOGOS_ASSERT_TRUE(retryAcknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(waitForLifecycleState(*impl, "uninitialized", 2));
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 8);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 9);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
+
     delete impl;
 }
 
@@ -703,6 +987,69 @@ LOGOS_TEST(nodeAction_sanitizes_start_callback_failure) {
                     std::string("Delivery start failed."));
     LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.fired);
     LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStarted.success);
+    LOGOS_ASSERT_EQ(delivery_test_events::g_lastNodeStarted.message,
+                    std::string("Delivery start failed."));
+    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStarted.message.find("secret=")
+                       != std::string::npos);
+    LOGOS_ASSERT_FALSE(delivery_test_events::lastNodeChangedEvent().find("secret=")
+                       != std::string::npos);
+
+    mock_delivery_reset_held_callbacks();
+    delete impl;
+}
+
+LOGOS_TEST(nodeAction_start_converts_malformed_success_cbor_to_safe_failure) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+
+    mock_delivery_hold_next_start();
+    const json acknowledgement = json::parse(impl->nodeAction(
+        lifecycleCommand("delivery-start-malformed-cbor", "start").dump()));
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+
+    const std::uint8_t malformedResponse[] = {0x61};
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_start_raw(
+        RET_OK, reinterpret_cast<const char*>(malformedResponse), sizeof(malformedResponse)));
+
+    const json status = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(status.at("state").get<std::string>(), std::string("stopped"));
+    LOGOS_ASSERT_EQ(status.at("last_error").at("code").get<std::string>(),
+                    std::string("start_failed"));
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.fired);
+    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStarted.success);
+    LOGOS_ASSERT_EQ(delivery_test_events::g_lastNodeStarted.message,
+                    std::string("Delivery start failed."));
+
+    mock_delivery_reset_held_callbacks();
+    delete impl;
+}
+
+LOGOS_TEST(nodeAction_sanitizes_stop_callback_failure) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    LOGOS_ASSERT_TRUE(impl->start().success);
+    delivery_test_events::resetNodeLifecycleEvents();
+    mock_delivery_reset_held_callbacks();
+
+    mock_delivery_hold_next_stop();
+    const json acknowledgement = json::parse(impl->nodeAction(
+        lifecycleCommand("delivery-stop-failure", "stop").dump()));
+    LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_stop(
+        RET_ERR, "delivery callback included secret=not-for-lifecycle-event"));
+
+    const json status = lifecycleSnapshot(*impl);
+    LOGOS_ASSERT_EQ(status.at("state").get<std::string>(), std::string("running"));
+    LOGOS_ASSERT_EQ(status.at("last_error").at("code").get<std::string>(),
+                    std::string("stop_failed"));
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStopped.fired);
+    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStopped.success);
+    LOGOS_ASSERT_EQ(delivery_test_events::g_lastNodeStopped.message,
+                    std::string("Delivery stop failed."));
+    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStopped.message.find("secret=")
+                       != std::string::npos);
     LOGOS_ASSERT_FALSE(delivery_test_events::lastNodeChangedEvent().find("secret=")
                        != std::string::npos);
 
@@ -854,6 +1201,48 @@ LOGOS_TEST(storeQuery_returns_store_response_json) {
 
     LOGOS_ASSERT_TRUE(result.success);
     LOGOS_ASSERT_EQ(result.value.get<std::string>(), std::string(response));
+    LOGOS_ASSERT(t.cFunctionCalled("waku_store_query"));
+
+    delete impl;
+}
+
+LOGOS_TEST(storeQuery_decodes_cbor_text_response_bytes) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    const std::string response =
+        R"({"requestId":"query-cbor","statusCode":200,"statusDesc":"OK","messages":[]})";
+    const std::vector<std::uint8_t> cborResponse = json::to_cbor(json(response));
+    mock_delivery_set_raw_store_query_response(
+        reinterpret_cast<const char*>(cborResponse.data()), cborResponse.size());
+
+    const StdLogosResult result = impl->storeQuery(
+        R"({"requestId":"query-cbor","includeData":true,"paginationForward":true})",
+        "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc",
+        5000);
+    mock_delivery_clear_raw_store_query_response();
+
+    LOGOS_ASSERT_TRUE(result.success);
+    LOGOS_ASSERT_EQ(result.value.get<std::string>(), response);
+    LOGOS_ASSERT(t.cFunctionCalled("waku_store_query"));
+
+    delete impl;
+}
+
+LOGOS_TEST(storeQuery_rejects_malformed_cbor_text_response_bytes) {
+    auto t = LogosTestContext("delivery_module");
+    auto* impl = createInitializedImpl(t);
+    const std::uint8_t malformedResponse[] = {0x61};
+    mock_delivery_set_raw_store_query_response(
+        reinterpret_cast<const char*>(malformedResponse), sizeof(malformedResponse));
+
+    const StdLogosResult result = impl->storeQuery(
+        R"({"requestId":"query-malformed","includeData":true,"paginationForward":true})",
+        "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc",
+        5000);
+    mock_delivery_clear_raw_store_query_response();
+
+    LOGOS_ASSERT_FALSE(result.success);
+    LOGOS_ASSERT_CONTAINS(result.error, "invalid CBOR text response");
     LOGOS_ASSERT(t.cFunctionCalled("waku_store_query"));
 
     delete impl;

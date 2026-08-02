@@ -43,6 +43,16 @@ constexpr const char* NODE_LIFECYCLE_ACK_SCHEMA =
     "logos.managed_node_lifecycle.ack";
 constexpr const char* NODE_LIFECYCLE_EVENT_SCHEMA =
     "logos.managed_node_lifecycle.event";
+constexpr const char* DELIVERY_EVENT_NAMES[] = {
+    "onMessageSent",
+    "onMessageError",
+    "onMessagePropagated",
+    "onMessageReceived",
+    "onConnectionStatusChange",
+    "onChannelMessageReceived",
+    "onChannelMessageSent",
+    "onChannelMessageError",
+};
 std::atomic<std::uint64_t> nextNodeLifecycleInstanceSerial{0};
 
 std::string base64Encode(const std::vector<uint8_t>& data) {
@@ -165,39 +175,195 @@ std::vector<uint8_t> decodeMessageReceivedPayload(const nlohmann::json& payloadV
     }
     return {};
 }
+
+bool isTerminalLifecycleCallbackResult(int callerRet)
+{
+    return callerRet == RET_OK || callerRet == RET_ERR;
+}
+
+bool lifecycleCallbackSucceeded(int callerRet,
+                                const char* msg,
+                                size_t len,
+                                std::string& message)
+{
+    if (callerRet != RET_OK) {
+        // RET_ERR carries a raw transport message. Never carry that payload
+        // into the host lifecycle event surface.
+        message.clear();
+        return false;
+    }
+    message = (msg && len > 0) ? std::string(msg, len) : std::string();
+    if (message.empty()) {
+        return true;
+    }
+
+    const auto decoded = decodeCborTextResponse(message);
+    if (!decoded) {
+        message = "Delivery lifecycle callback returned invalid CBOR text.";
+        return false;
+    }
+    message = *decoded;
+    return true;
+}
 } // namespace
 
 void DeliveryModuleImpl::start_callback(int callerRet, const char* msg, size_t len, void* userData)
 {
-    auto* impl = static_cast<DeliveryModuleImpl*>(userData);
-    if (!impl) return;
-    impl->settleLifecycleCallback("start", callerRet == RET_OK);
-    impl->nodeStarted(callerRet == RET_OK,
-                      (msg && len > 0) ? std::string(msg, len) : std::string(),
+    if (!isTerminalLifecycleCallbackResult(callerRet)) return;
+
+    DeliveryModuleImpl* impl = nullptr;
+    EventCallbackContext* const callbackContext =
+        acquireEventCallbackContext(userData, impl);
+    if (!callbackContext) return;
+    EventCallbackLease callbackLease{callbackContext};
+
+    std::string message;
+    const bool success = lifecycleCallbackSucceeded(callerRet, msg, len, message);
+    impl->settleLifecycleCallback("start", success);
+    impl->nodeStarted(success,
+                      success ? message : lifecycleFailureMessage("start"),
                       currentTimestampNs());
 }
 
 void DeliveryModuleImpl::stop_callback(int callerRet, const char* msg, size_t len, void* userData)
 {
-    auto* impl = static_cast<DeliveryModuleImpl*>(userData);
-    if (!impl) return;
-    impl->settleLifecycleCallback("stop", callerRet == RET_OK);
-    impl->nodeStopped(callerRet == RET_OK,
-                      (msg && len > 0) ? std::string(msg, len) : std::string(),
+    if (!isTerminalLifecycleCallbackResult(callerRet)) return;
+
+    DeliveryModuleImpl* impl = nullptr;
+    EventCallbackContext* const callbackContext =
+        acquireEventCallbackContext(userData, impl);
+    if (!callbackContext) return;
+    EventCallbackLease callbackLease{callbackContext};
+
+    std::string message;
+    const bool success = lifecycleCallbackSucceeded(callerRet, msg, len, message);
+    impl->settleLifecycleCallback("stop", success);
+    impl->nodeStopped(success,
+                      success ? message : lifecycleFailureMessage("stop"),
                       currentTimestampNs());
 }
 
 DeliveryModuleImpl::DeliveryModuleImpl()
     : deliveryCtx(nullptr),
+      eventCallbackContext(std::make_unique<EventCallbackContext>()),
+      eventCallbackHandle(std::make_unique<EventCallbackHandle>()),
       lifecycleInstanceId(makeNodeLifecycleInstanceId()),
       lifecycleUpdatedAtMs(nodeLifecycleTimestampMs())
 {
+    eventCallbackContext->owner.store(this, std::memory_order_release);
+    registerEventCallbackContext();
     fprintf(stderr, "DeliveryModuleImpl: Initializing...\n");
     fprintf(stderr, "DeliveryModuleImpl: Initialized successfully\n");
 }
 
+DeliveryModuleImpl::EventCallbackRegistry& DeliveryModuleImpl::eventCallbackRegistry()
+{
+    // This registry can be touched by a callback during dynamic-library
+    // teardown. Keep it process-live to avoid static-destruction ordering.
+    static auto* registry = new EventCallbackRegistry();
+    return *registry;
+}
+
+void DeliveryModuleImpl::registerEventCallbackContext()
+{
+    auto& registry = eventCallbackRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    registry.contexts.emplace(eventCallbackHandle.get(), eventCallbackContext.get());
+}
+
+void DeliveryModuleImpl::closeEventCallbackContext()
+{
+    auto& registry = eventCallbackRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    eventCallbackContext->close();
+    const auto entry = registry.contexts.find(eventCallbackHandle.get());
+    if (entry != registry.contexts.end()
+        && entry->second == eventCallbackContext.get()) {
+        registry.contexts.erase(entry);
+    }
+}
+
+DeliveryModuleImpl::EventCallbackContext*
+DeliveryModuleImpl::acquireEventCallbackContext(void* userData,
+                                                 DeliveryModuleImpl*& owner)
+{
+    owner = nullptr;
+    if (!userData) {
+        return nullptr;
+    }
+
+    auto& registry = eventCallbackRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    const auto entry = registry.contexts.find(userData);
+    if (entry == registry.contexts.end()) {
+        return nullptr;
+    }
+
+    EventCallbackContext* const callbackContext = entry->second;
+    owner = callbackContext->acquireOwner();
+    return owner ? callbackContext : nullptr;
+}
+
+void DeliveryModuleImpl::retainEventCallbackHandle(std::unique_ptr<EventCallbackHandle> handle)
+{
+    if (!handle) {
+        return;
+    }
+
+    // A late FFI callback may still carry this opaque pointer after teardown.
+    // It is never reused: event_callback() treats it only as a registry key.
+    // Retaining the tiny key, rather than the callback context, makes that
+    // callback a safe no-op without retaining the module or node resources.
+    static auto* retainedHandlesMutex = new std::mutex();
+    static auto* retainedHandles = new std::vector<std::unique_ptr<EventCallbackHandle>>();
+    std::lock_guard<std::mutex> lock(*retainedHandlesMutex);
+    retainedHandles->push_back(std::move(handle));
+}
+
+bool DeliveryModuleImpl::registerEventListeners()
+{
+    if (!deliveryCtx || !eventListenerIds.empty()) {
+        return false;
+    }
+    eventListenersReady.store(false, std::memory_order_release);
+
+    for (const char* eventName : DELIVERY_EVENT_NAMES) {
+        const std::uint64_t listenerId = logosdelivery_add_event_listener(
+            deliveryCtx, eventName, event_callback, eventCallbackHandle.get());
+        if (listenerId == 0) {
+            (void)removeEventListeners();
+            return false;
+        }
+        eventListenerIds.push_back(listenerId);
+    }
+
+    eventListenersReady.store(true, std::memory_order_release);
+    return true;
+}
+
+bool DeliveryModuleImpl::removeEventListeners()
+{
+    eventListenersReady.store(false, std::memory_order_release);
+    if (!deliveryCtx) {
+        const bool hadListeners = !eventListenerIds.empty();
+        eventListenerIds.clear();
+        return !hadListeners;
+    }
+
+    std::vector<std::uint64_t> unresolvedListenerIds;
+    unresolvedListenerIds.reserve(eventListenerIds.size());
+    for (const std::uint64_t listenerId : eventListenerIds) {
+        if (logosdelivery_remove_event_listener(deliveryCtx, listenerId) != RET_OK) {
+            unresolvedListenerIds.push_back(listenerId);
+        }
+    }
+    eventListenerIds = std::move(unresolvedListenerIds);
+    return eventListenerIds.empty();
+}
+
 DeliveryModuleImpl::~DeliveryModuleImpl()
 {
+    closeEventCallbackContext();
     {
         std::lock_guard<std::mutex> lock(lifecycleMutex);
         ++lifecycleGeneration;
@@ -226,26 +392,39 @@ DeliveryModuleImpl::~DeliveryModuleImpl()
         }
     }
     std::lock_guard<std::mutex> createNodeLock(createNodeMutex);
+    bool listenersRemoved = removeEventListeners();
+    if (!listenersRemoved) {
+        // A transient FFI failure can leave only a subset of listener IDs
+        // unresolved. Retry that subset once before the single destroy request.
+        listenersRemoved = removeEventListeners();
+    }
     if (deliveryCtx) {
         // liblogosdelivery validates its callback before it tears down the FFI
         // context. Keep destruction on the same callback path as normal calls;
-        // a null callback is rejected without releasing the context.
+        // a null callback is rejected without releasing the context. Do not
+        // retry this request: a failed FFI call may still be in flight.
         (void)callApiRetVoid(
             "destroy", CALLBACK_TIMEOUT,
             bindApiCall(logosdelivery_destroy, deliveryCtx));
         deliveryCtx = nullptr;
     }
+    eventCallbackContext->waitForCallbacks();
+    retainEventCallbackHandle(std::move(eventCallbackHandle));
 }
 
 void DeliveryModuleImpl::event_callback(int callerRet, const char* msg, size_t len, void* userData)
 {
     fprintf(stderr, "DeliveryModuleImpl::event_callback called with ret: %d\n", callerRet);
 
-    DeliveryModuleImpl* impl = static_cast<DeliveryModuleImpl*>(userData);
-    if (!impl) {
+    DeliveryModuleImpl* impl = nullptr;
+    EventCallbackContext* const callbackContext =
+        acquireEventCallbackContext(userData, impl);
+    if (!callbackContext) {
         fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid userData\n");
         return;
     }
+
+    EventCallbackLease callbackLease{callbackContext};
 
     if (msg && len > 0) {
         std::string message(msg, len);
@@ -500,7 +679,10 @@ std::string DeliveryModuleImpl::lifecycleSnapshotLocked() const
     snapshot["scope"] = {{"kind", "messaging"}};
     snapshot["state"] = lifecycleStateName(lifecycleState);
     snapshot["health"] = lifecycleError.empty() ? "unknown" : "degraded";
-    snapshot["supported_actions"] = lifecycleActions(lifecycleState);
+    snapshot["supported_actions"] = lifecycleState == LifecycleState::Stopped
+            && !eventListenersReady.load(std::memory_order_acquire)
+        ? std::vector<std::string>{"destroy"}
+        : lifecycleActions(lifecycleState);
     snapshot["pending_operation"] = nullptr;
     if (lifecyclePending && !activeLifecycleOperationId.empty()) {
         const auto pending = lifecycleOperations.find(activeLifecycleOperationId);
@@ -696,6 +878,12 @@ DeliveryModuleImpl::LifecycleDispatch DeliveryModuleImpl::beginLifecycleAction(
                 settleWithoutDispatch(LifecycleDispatchDisposition::Rejected, false,
                                       "rejected", "invalid_state",
                                       "Delivery must be stopped before it can start.");
+                return dispatch;
+            }
+            if (!eventListenersReady.load(std::memory_order_acquire)) {
+                settleWithoutDispatch(LifecycleDispatchDisposition::Rejected, false,
+                                      "rejected", "event_listener_cleanup_pending",
+                                      "Delivery event listener cleanup must complete before start.");
                 return dispatch;
             }
         } else if (action == "stop") {
@@ -896,6 +1084,10 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
     auto callback = +[](int callerRet, const char* msg, size_t len, void* userData) {
         fprintf(stderr, "DeliveryModuleImpl::createNode callback called with ret: %d\n", callerRet);
 
+        if (!isTerminalLifecycleCallbackResult(callerRet)) {
+            return;
+        }
+
         std::shared_ptr<CallbackContext> callbackCtx;
         {
             std::lock_guard<std::mutex> lock(pendingMutex);
@@ -955,7 +1147,47 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
 
     fprintf(stderr, "DeliveryModuleImpl: Delivery context created successfully\n");
 
-    logosdelivery_set_event_callback(deliveryCtx, event_callback, this);
+    if (!registerEventListeners()) {
+        if (!eventListenerIds.empty()) {
+            fprintf(stderr, "DeliveryModuleImpl: Failed to remove partially registered Delivery event listeners\n");
+            const StdLogosResult result{
+                false, {}, "Failed to remove partially registered Delivery event listeners"};
+            settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                                  dispatch.previousState, LifecycleState::Stopped,
+                                  LifecycleState::Stopped, false);
+            return result;
+        }
+
+        const StdLogosResult cleanupResult = callApiRetVoid(
+            "destroy", CALLBACK_TIMEOUT,
+            bindApiCall(logosdelivery_destroy, deliveryCtx));
+        if (cleanupResult.success) {
+            deliveryCtx = nullptr;
+
+            fprintf(stderr, "DeliveryModuleImpl: Failed to register Delivery event listeners\n");
+            const StdLogosResult result{false, {}, "Failed to register Delivery event listeners"};
+            settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                                  dispatch.previousState, LifecycleState::Stopped,
+                                  LifecycleState::Uninitialized, false);
+            return result;
+        }
+
+        if (eventListenerIds.empty() && registerEventListeners()) {
+            const StdLogosResult result{true, {}};
+            settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                                  dispatch.previousState, LifecycleState::Stopped,
+                                  LifecycleState::Stopped, true);
+            return result;
+        }
+
+        fprintf(stderr, "DeliveryModuleImpl: Failed to recover Delivery event listeners after cleanup failure\n");
+        const StdLogosResult result{
+            false, {}, "Failed to register Delivery event listeners and recover Delivery context"};
+        settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                              dispatch.previousState, LifecycleState::Stopped,
+                              LifecycleState::Stopped, false);
+        return result;
+    }
     const StdLogosResult result{true, {}};
     settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
                           dispatch.previousState, LifecycleState::Stopped,
@@ -1013,9 +1245,18 @@ StdLogosResult DeliveryModuleImpl::startPrepared(const LifecycleDispatch& dispat
         return result;
     }
 
+    if (!eventListenersReady.load(std::memory_order_acquire)) {
+        const StdLogosResult result{false, {}, "Delivery event listener cleanup is pending"};
+        settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                              dispatch.previousState, LifecycleState::Running,
+                              dispatch.previousState, false);
+        return result;
+    }
+
     // Node start can block for a long time (relay reconnect backoff), so return
     // once dispatched. Completion arrives via nodeStarted.
-    if (logosdelivery_start_node(deliveryCtx, start_callback, this) != RET_OK) {
+    if (logosdelivery_start_node(
+            deliveryCtx, start_callback, eventCallbackHandle.get()) != RET_OK) {
         const StdLogosResult result{false, {}, "failed to initiate start"};
         settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
                               dispatch.previousState, LifecycleState::Running,
@@ -1035,7 +1276,8 @@ StdLogosResult DeliveryModuleImpl::stopPrepared(const LifecycleDispatch& dispatc
         return result;
     }
 
-    if (logosdelivery_stop_node(deliveryCtx, stop_callback, this) != RET_OK) {
+    if (logosdelivery_stop_node(
+            deliveryCtx, stop_callback, eventCallbackHandle.get()) != RET_OK) {
         const StdLogosResult result{false, {}, "failed to initiate stop"};
         settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
                               dispatch.previousState, LifecycleState::Stopped,
@@ -1056,19 +1298,30 @@ StdLogosResult DeliveryModuleImpl::destroyPrepared(const LifecycleDispatch& disp
         return result;
     }
 
+    if (!removeEventListeners()) {
+        const StdLogosResult result{false, {}, "Failed to remove Delivery event listeners"};
+        settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                              dispatch.previousState, LifecycleState::Uninitialized,
+                              dispatch.previousState, false);
+        return result;
+    }
+
     // logosdelivery_destroy joins the FFI worker and can block. This runs on a
     // dedicated lifecycle worker so nodeAction() remains an acknowledgement-only
     // API. The C API requires a callback and reports its terminal result there.
-    const StdLogosResult result = callApiRetVoid(
+    StdLogosResult result = callApiRetVoid(
         "destroy", CALLBACK_TIMEOUT,
         bindApiCall(logosdelivery_destroy, deliveryCtx));
     if (result.success) {
         deliveryCtx = nullptr;
     } else {
-        // checkParams() temporarily associates the FFI context with the
-        // teardown callback. A failed teardown leaves the context available
-        // for retry, so restore the long-lived event recipient first.
-        logosdelivery_set_event_callback(deliveryCtx, event_callback, this);
+        // A failed teardown leaves the context available for retry. Restore
+        // its long-lived event listeners after the teardown callback releases
+        // the FFI context's event registry lock.
+        if (!registerEventListeners()) {
+            fprintf(stderr, "DeliveryModuleImpl: Failed to restore Delivery event listeners\n");
+            result.error = "Delivery destruction failed and event listener restoration failed";
+        }
     }
     settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
                           dispatch.previousState, LifecycleState::Uninitialized,
@@ -1097,6 +1350,9 @@ StdLogosResult DeliveryModuleImpl::start()
     fprintf(stderr, "DeliveryModuleImpl::start called\n");
     if (!deliveryCtx) {
         return {false, {}, "Context not initialized"};
+    }
+    if (!eventListenersReady.load(std::memory_order_acquire)) {
+        return {false, {}, "Delivery event listener cleanup is pending"};
     }
     const LifecycleDispatch dispatch = beginLifecycleAction(
         "start", {}, {}, false, {}, 0, 0, false);

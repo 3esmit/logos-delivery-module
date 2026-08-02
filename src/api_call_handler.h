@@ -1,14 +1,18 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <semaphore>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <logos_result.h>
+#include <nlohmann/json.hpp>
 
 extern "C" {
 #include <liblogosdelivery.h>
@@ -21,6 +25,20 @@ struct CallbackPayload {
     int callerRet{RET_ERR};
     std::string message;
 };
+
+std::optional<std::string> decodeCborTextResponse(const std::string& payload)
+{
+    if (payload.empty()) {
+        return std::string{};
+    }
+
+    const std::vector<std::uint8_t> bytes(payload.begin(), payload.end());
+    const auto decoded = nlohmann::json::from_cbor(bytes, true, false);
+    if (decoded.is_discarded() || !decoded.is_string()) {
+        return std::nullopt;
+    }
+    return decoded.get<std::string>();
+}
 
 template <typename Func, typename... BoundArgs>
 auto bindApiCall(Func func, void* callbackCtx, BoundArgs&&... boundArgs)
@@ -50,6 +68,10 @@ StdLogosResult callApiRetVoid(const std::string& operationName, std::chrono::sec
     }
 
     auto callback = +[](int callerRet, const char* msg, size_t len, void* userData) {
+        if (callerRet == RET_STALE_WARN) {
+            return;
+        }
+
         std::shared_ptr<CallbackContext> callbackCtx;
         {
             std::lock_guard<std::mutex> lock(pendingMutex);
@@ -114,6 +136,10 @@ StdLogosResult callApiRetValue(
     }
 
     auto callback = +[](int callerRet, const char* msg, size_t len, void* userData) {
+        if (callerRet == RET_STALE_WARN) {
+            return;
+        }
+
         std::shared_ptr<CallbackContext> callbackCtx;
         {
             std::lock_guard<std::mutex> lock(pendingMutex);
@@ -152,6 +178,10 @@ StdLogosResult callApiRetValue(
         return {false, {}, message};
     }
 
-    return {true, callbackCtx->payload.message};
+    const auto decodedResponse = decodeCborTextResponse(callbackCtx->payload.message);
+    if (!decodedResponse) {
+        return {false, {}, operationName + " returned an invalid CBOR text response"};
+    }
+    return {true, *decodedResponse};
 }
 } // namespace
