@@ -127,7 +127,8 @@ json nodeLifecycleError(const std::string& code,
     };
 }
 
-// message_received: JSON array of byte values.
+// message_received producers use a JSON array of byte values. Keep accepting
+// the base64 form previously accepted by this module for compatibility.
 std::vector<uint8_t> decodeByteArrayPayload(const nlohmann::json& payloadValue) {
     if (!payloadValue.is_array()) {
         return {};
@@ -153,6 +154,16 @@ std::vector<uint8_t> decodeBase64Payload(const nlohmann::json& payloadValue) {
         return {};
     }
     return base64Decode(payloadValue.get<std::string>());
+}
+
+std::vector<uint8_t> decodeMessageReceivedPayload(const nlohmann::json& payloadValue) {
+    if (payloadValue.is_array()) {
+        return decodeByteArrayPayload(payloadValue);
+    }
+    if (payloadValue.is_string()) {
+        return decodeBase64Payload(payloadValue);
+    }
+    return {};
 }
 } // namespace
 
@@ -282,7 +293,7 @@ void DeliveryModuleImpl::event_callback(int callerRet, const char* msg, size_t l
 
                 std::vector<uint8_t> payloadBytes;
                 if (msgObj.contains("payload")) {
-                    payloadBytes = decodeByteArrayPayload(msgObj["payload"]);
+                    payloadBytes = decodeMessageReceivedPayload(msgObj["payload"]);
                 }
 
                 int64_t msgTimestamp = static_cast<int64_t>(msgObj.value("timestamp", 0.0));
@@ -361,11 +372,33 @@ static bool isFlatShape(const nlohmann::json& cfgObj)
     return false;
 }
 
-// Defaults the node's storage directory to the host's per-instance path, so
-// side-by-side instances don't share upstream's cwd-relative "./data". The
-// path goes where each config shape accepts it: kernelConf when present,
-// messagingOverrides (created if needed) for the layered shapes, top level
-// for the legacy flat shape.
+static void defaultRawPort(nlohmann::json& cfgObj,
+                           const char* canonicalKey,
+                           std::initializer_list<const char*> acceptedKeys)
+{
+    if (!findKey(cfgObj, acceptedKeys)) {
+        cfgObj[canonicalKey] = 0;
+    }
+}
+
+// Raw WakuNodeConf configurations retain the module's ephemeral port policy so
+// multiple module instances can share a host. Structured configurations do not
+// receive these raw keys: the delivery parser gives their MessagingClientConf
+// transport fields ephemeral defaults and rejects raw REST/metrics fields.
+static void applyRawPortDefaults(nlohmann::json& cfgObj)
+{
+    defaultRawPort(cfgObj, "tcpPort", {"tcpport", "tcp-port"});
+    defaultRawPort(cfgObj, "discv5UdpPort", {"discv5udpport", "discv5-udp-port"});
+    defaultRawPort(cfgObj, "restPort", {"restport", "rest-port"});
+    defaultRawPort(cfgObj, "metricsServerPort", {"metricsserverport", "metrics-server-port"});
+    defaultRawPort(cfgObj, "websocketPort", {"websocketport", "websocket-port"});
+}
+
+// Defaults raw node ports to ephemeral values and the storage directory to the
+// host's per-instance path. Raw fields belong at the top level for legacy
+// flat configurations and in kernelConf for kernel-only configurations.
+// Structured configurations stay unchanged: MessagingClientConf rejects the
+// raw storage field, and it has no equivalent per-instance storage setting.
 static std::optional<std::string> applyConfigDefaults(const std::string& cfg,
                                                       const std::string& persistencePath)
 {
@@ -382,29 +415,25 @@ static std::optional<std::string> applyConfigDefaults(const std::string& cfg,
         return std::nullopt;
     }
 
-    if (!persistencePath.empty()) {
-        nlohmann::json* target = &cfgObj;
-        const auto entryLayerKey = findKey(cfgObj, {"entrylayer"});
-        const bool kernelEntry = entryLayerKey && cfgObj[*entryLayerKey].is_string()
-            && toLowerCopy(cfgObj[*entryLayerKey].get<std::string>()) == "kernel";
-        if (auto kernelConfKey = findKey(cfgObj, {"kernelconf"});
-            kernelConfKey && cfgObj[*kernelConfKey].is_object()) {
-            target = &cfgObj[*kernelConfKey];
-        } else if (kernelEntry) {
-            // Kernel entry without a kernelConf object: leave the config
-            // untouched for the parser to reject.
-            target = nullptr;
-        } else if (!isFlatShape(cfgObj)) {
-            auto overridesKey = findKey(cfgObj, {"messagingoverrides"});
-            if (!overridesKey) {
-                cfgObj["messagingOverrides"] = nlohmann::json::object();
-                overridesKey = "messagingOverrides";
-            }
-            target = cfgObj[*overridesKey].is_object() ? &cfgObj[*overridesKey] : nullptr;
-        }
-        if (target && !findKey(*target, {"localstoragepath", "local-storage-path"})) {
-            (*target)["localStoragePath"] = persistencePath + "/data";
-        }
+    const auto entryLayerKey = findKey(cfgObj, {"entrylayer"});
+    const bool kernelEntry = entryLayerKey && cfgObj[*entryLayerKey].is_string()
+        && toLowerCopy(cfgObj[*entryLayerKey].get<std::string>()) == "kernel";
+    const bool flatShape = isFlatShape(cfgObj);
+
+    nlohmann::json* kernelTarget = nullptr;
+    if (auto kernelConfKey = findKey(cfgObj, {"kernelconf"});
+        kernelConfKey && cfgObj[*kernelConfKey].is_object()) {
+        kernelTarget = &cfgObj[*kernelConfKey];
+    } else if (!kernelEntry && flatShape) {
+        kernelTarget = &cfgObj;
+    }
+    if (kernelTarget) {
+        applyRawPortDefaults(*kernelTarget);
+    }
+
+    if (kernelTarget && !persistencePath.empty()
+        && !findKey(*kernelTarget, {"localstoragepath", "local-storage-path"})) {
+        (*kernelTarget)["localStoragePath"] = persistencePath + "/data";
     }
 
     return cfgObj.dump();

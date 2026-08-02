@@ -5,8 +5,8 @@
 //
 // The node-lifecycle events (nodeStarted / nodeStopped) record their last
 // payload in process-global slots (see delivery_module_events_stub.h) so tests
-// can assert that start()/stop() emit them. The message/connection events stay
-// no-ops.
+// can assert that start()/stop() emit them. messageReceived is captured too,
+// allowing the FFI event decoder to be tested without a real delivery node.
 
 #include "delivery_module_plugin.h"
 
@@ -21,6 +21,8 @@ NodeLifecycleEvent g_lastNodeStopped{};
 namespace {
 std::mutex nodeChangedEventsMutex;
 std::vector<std::string> nodeChangedEvents;
+std::mutex messageReceivedEventMutex;
+MessageReceivedEvent g_lastMessageReceived;
 }
 
 void resetNodeLifecycleEvents()
@@ -29,6 +31,33 @@ void resetNodeLifecycleEvents()
     g_lastNodeStarted = NodeLifecycleEvent{};
     g_lastNodeStopped = NodeLifecycleEvent{};
     nodeChangedEvents.clear();
+}
+
+void resetMessageReceivedEvent()
+{
+    std::lock_guard<std::mutex> lock(messageReceivedEventMutex);
+    g_lastMessageReceived = MessageReceivedEvent{};
+}
+
+MessageReceivedEvent lastMessageReceivedEvent()
+{
+    std::lock_guard<std::mutex> lock(messageReceivedEventMutex);
+    return g_lastMessageReceived;
+}
+
+void recordMessageReceivedEvent(const std::string& messageHash,
+                                const std::string& contentTopic,
+                                const std::vector<uint8_t>& payload,
+                                int64_t timestamp)
+{
+    std::lock_guard<std::mutex> lock(messageReceivedEventMutex);
+    g_lastMessageReceived = {
+        messageHash,
+        contentTopic,
+        payload,
+        timestamp,
+        true,
+    };
 }
 
 std::size_t nodeChangedEventCount()
@@ -63,7 +92,13 @@ void DeliveryModuleImpl::nodeChanged(const std::string& event) {
 void DeliveryModuleImpl::messageSent(const std::string&, const std::string&, int64_t) {}
 void DeliveryModuleImpl::messageError(const std::string&, const std::string&, const std::string&, int64_t) {}
 void DeliveryModuleImpl::messagePropagated(const std::string&, const std::string&, int64_t) {}
-void DeliveryModuleImpl::messageReceived(const std::string&, const std::string&, const std::vector<uint8_t>&, int64_t) {}
+void DeliveryModuleImpl::messageReceived(const std::string& messageHash,
+                                         const std::string& contentTopic,
+                                         const std::vector<uint8_t>& payload,
+                                         int64_t timestamp)
+{
+    delivery_test_events::recordMessageReceivedEvent(messageHash, contentTopic, payload, timestamp);
+}
 void DeliveryModuleImpl::connectionStateChanged(const std::string&, int64_t) {}
 void DeliveryModuleImpl::channelMessageReceived(const std::string&, const std::string&, const std::vector<uint8_t>&, int64_t) {}
 void DeliveryModuleImpl::channelMessageSent(const std::string&, const std::string&, int64_t) {}

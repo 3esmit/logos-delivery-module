@@ -46,8 +46,8 @@ def test_two_nodes_propagation(node_a, node_b):
 
     logger.info("messagePropagated payload: %r", parse_event(event))
     rid = event_request_id(event)
-    if rid is not None:
-        assert rid == request_id, f"messagePropagated requestId {rid!r} != sent {request_id!r}"
+    assert rid is not None, "messagePropagated omitted requestId in arg0"
+    assert rid == request_id, f"messagePropagated requestId {rid!r} != sent {request_id!r}"
 
 
 def test_bidirectional_propagation(node_a, node_b):
@@ -62,8 +62,8 @@ def test_bidirectional_propagation(node_a, node_b):
             assert request_id, f"send from {sender.label} returned an empty requestId"
             event = wait_for_event(w, "messagePropagated", timeout=PROPAGATED_TIMEOUT_S)
         rid = event_request_id(event)
-        if rid is not None:
-            assert rid == request_id, f"{sender.label}: propagated requestId {rid!r} != sent {request_id!r}"
+        assert rid is not None, f"{sender.label}: messagePropagated omitted requestId in arg0"
+        assert rid == request_id, f"{sender.label}: propagated requestId {rid!r} != sent {request_id!r}"
 
 
 def test_two_nodes_message_received(node_a, node_b):
@@ -79,5 +79,5 @@ def test_two_nodes_message_received(node_a, node_b):
 
     logger.info("messageReceived payload: %r", parse_event(event))
     topic = event_content_topic(event)
-    if topic is not None:
-        assert topic == CONTENT_TOPIC, f"messageReceived contentTopic {topic!r} != {CONTENT_TOPIC!r}"
+    assert topic is not None, "messageReceived omitted contentTopic in arg1"
+    assert topic == CONTENT_TOPIC, f"messageReceived contentTopic {topic!r} != {CONTENT_TOPIC!r}"
