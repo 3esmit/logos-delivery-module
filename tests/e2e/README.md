@@ -80,12 +80,12 @@ export LOGOS_MODULES_DIR=$PWD/result/modules
 
 # 2. Build the logoscore smoke image (one-time) + CLI, pinned together.
 git clone https://github.com/logos-co/logos-logoscore-py.git /tmp/logoscore-py
-cd /tmp/logoscore-py && git checkout aa45db52
+cd /tmp/logoscore-py && git checkout f890d58e7b71572fc7888abe313c758e7ad7144b
 bash tests/docker_smoke/build_smoke_image.sh
 export LOGOSCORE_IMAGE=logoscore:smoke-portable
 cd -
 nix build --out-link /tmp/logoscore-cli \
-  "github:logos-co/logos-logoscore-cli/5a1cf746e841e8e8a8fd48333cff55bd12c45c52#cli"
+  "github:logos-co/logos-logoscore-cli/514903dea37a3aff1a2b99bd27ae8ba5531c8354#cli"
 export PATH="/tmp/logoscore-cli/bin:$PATH"
 
 # 3. Install deps + run.
