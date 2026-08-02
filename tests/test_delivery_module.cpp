@@ -33,6 +33,8 @@ constexpr const char* kDeliveryEventNames[] = {
     "onChannelMessageSent",
     "onChannelMessageError",
 };
+constexpr int kDeliveryEventCount =
+    static_cast<int>(sizeof(kDeliveryEventNames) / sizeof(kDeliveryEventNames[0]));
 
 json lifecycleSnapshot(DeliveryModuleImpl& impl)
 {
@@ -111,7 +113,8 @@ bool waitForHeldDestroyCallback()
 
 void assertDeliveryEventListenersRegistered()
 {
-    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{8});
+    LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(),
+                    static_cast<std::size_t>(kDeliveryEventCount));
     for (const char* eventName : kDeliveryEventNames) {
         LOGOS_ASSERT_TRUE(mock_delivery_has_event_listener(eventName));
     }
@@ -138,7 +141,8 @@ LOGOS_TEST(createNode_succeeds_when_ffi_returns_non_null_context) {
     DeliveryModuleImpl impl;
     LOGOS_ASSERT_TRUE(impl.createNode(R"({"logLevel":"INFO"})").success);
     LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_create_node"));
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 8);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"),
+                    kDeliveryEventCount);
     assertDeliveryEventListenersRegistered();
 }
 
@@ -176,7 +180,8 @@ LOGOS_TEST(createNode_recovers_after_listener_cleanup_destroy_failure) {
 
     DeliveryModuleImpl impl;
     LOGOS_ASSERT_TRUE(impl.createNode(R"({"logLevel":"INFO"})").success);
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 11);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"),
+                    kDeliveryEventCount + 3);
     LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 2);
     LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
     assertDeliveryEventListenersRegistered();
@@ -232,7 +237,8 @@ LOGOS_TEST(createNode_succeeds_with_logos_dev_preset_config) {
     DeliveryModuleImpl impl;
     LOGOS_ASSERT_TRUE(impl.createNode(R"({"logLevel":"DEBUG","mode":"Core","preset":"logos.dev"})").success);
     LOGOS_ASSERT(t.cFunctionCalled("logosdelivery_create_node"));
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 8);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"),
+                    kDeliveryEventCount);
     assertDeliveryEventListenersRegistered();
 }
 
@@ -243,7 +249,8 @@ LOGOS_TEST(destructor_removes_event_listeners_before_teardown) {
 
     delete impl;
 
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 8);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"),
+                    kDeliveryEventCount);
     LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
 }
 
@@ -257,7 +264,8 @@ LOGOS_TEST(destructor_retries_transient_listener_removal_before_failed_teardown)
     delete impl;
 
     const char* event = R"({"eventType":"message_received","messageHash":"late","message":{"contentTopic":"/test/1/delivery/proto","payload":[1],"timestamp":1}})";
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 9);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"),
+                    kDeliveryEventCount + 1);
     LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
     LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
     LOGOS_ASSERT_FALSE(mock_delivery_emit_event(RET_OK, event));
@@ -271,7 +279,8 @@ LOGOS_TEST(destructor_limits_persistent_listener_removal_to_one_retry) {
 
     delete impl;
 
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 16);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"),
+                    2 * kDeliveryEventCount);
     LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
     LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
 
@@ -866,8 +875,10 @@ LOGOS_TEST(nodeAction_destroy_failure_restores_stopped_state) {
     LOGOS_ASSERT_EQ(status.at("last_error").at("message").get<std::string>(),
                     std::string("Delivery destruction failed."));
     LOGOS_ASSERT_FALSE(lastNodeChangedEvent().dump().find("secret=") != std::string::npos);
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 16);
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 8);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"),
+                    2 * kDeliveryEventCount);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"),
+                    kDeliveryEventCount);
     assertDeliveryEventListenersRegistered();
 
     mock_delivery_reset_held_callbacks();
@@ -885,8 +896,10 @@ LOGOS_TEST(nodeAction_destroy_listener_removal_failure_is_retryable_without_dupl
         lifecycleCommandWithExpected("delivery-destroy-listener-removal-1", "destroy", stopped).dump()));
     LOGOS_ASSERT_TRUE(firstAcknowledgement.at("accepted").get<bool>());
     LOGOS_ASSERT_TRUE(waitForLifecycleState(*impl, "stopped", 2));
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 8);
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 8);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"),
+                    kDeliveryEventCount);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"),
+                    kDeliveryEventCount);
     LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 0);
     LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{1});
 
@@ -897,8 +910,10 @@ LOGOS_TEST(nodeAction_destroy_listener_removal_failure_is_retryable_without_dupl
         lifecycleCommandWithExpected("delivery-destroy-listener-removal-2", "destroy", retryStopped).dump()));
     LOGOS_ASSERT_TRUE(retryAcknowledgement.at("accepted").get<bool>());
     LOGOS_ASSERT_TRUE(waitForLifecycleState(*impl, "uninitialized", 2));
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"), 8);
-    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"), 9);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_add_event_listener"),
+                    kDeliveryEventCount);
+    LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_remove_event_listener"),
+                    kDeliveryEventCount + 1);
     LOGOS_ASSERT_EQ(t.cFunctionCallCount("logosdelivery_destroy"), 1);
     LOGOS_ASSERT_EQ(mock_delivery_event_listener_count(), std::size_t{0});
 
