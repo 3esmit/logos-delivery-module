@@ -19,4 +19,10 @@ bool mock_delivery_has_held_create();
 bool mock_delivery_has_held_destroy();
 void mock_delivery_reset_held_callbacks();
 
+// Test-only access to the configuration and long-lived event callback that the
+// module hands to the C FFI. The returned config pointer remains valid until
+// the next call on this test thread.
+const char* mock_delivery_last_create_config();
+bool mock_delivery_emit_event(int caller_result, const char* event_json);
+
 }

@@ -18,6 +18,7 @@
 #include <cstring>
 #include <mutex>
 #include <optional>
+#include <string>
 
 #define RET_OK  0
 #define RET_ERR 1
@@ -32,6 +33,11 @@ struct DeferredLifecycleCallback {
     void* userData = nullptr;
 };
 
+struct EventCallback {
+    logosdelivery_callback callback = nullptr;
+    void* userData = nullptr;
+};
+
 std::mutex deferredLifecycleCallbackMutex;
 std::optional<DeferredLifecycleCallback> deferredCreateCallback;
 std::optional<DeferredLifecycleCallback> deferredStartCallback;
@@ -41,6 +47,9 @@ bool holdNextCreateCallback = false;
 bool holdNextStartCallback = false;
 bool holdNextStopCallback = false;
 bool holdNextDestroyCallback = false;
+std::mutex eventCallbackMutex;
+std::optional<EventCallback> eventCallback;
+std::string lastCreateConfig;
 
 // Helper: invoke callback with RET_OK and the string configured in the mock store.
 static void invokeOk(const char* funcName, logosdelivery_callback cb, void* userData) {
@@ -51,8 +60,12 @@ static void invokeOk(const char* funcName, logosdelivery_callback cb, void* user
 
 extern "C" {
 
-void* logosdelivery_create_node(const char* /*cfg*/, logosdelivery_callback cb, void* userData) {
+void* logosdelivery_create_node(const char* cfg, logosdelivery_callback cb, void* userData) {
     LOGOS_CMOCK_RECORD("logosdelivery_create_node");
+    {
+        std::lock_guard<std::mutex> lock(eventCallbackMutex);
+        lastCreateConfig = cfg ? cfg : "";
+    }
     int ok = LOGOS_CMOCK_RETURN(int, "logosdelivery_create_node");
     if (ok && cb) {
         std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
@@ -68,8 +81,10 @@ void* logosdelivery_create_node(const char* /*cfg*/, logosdelivery_callback cb, 
     return ok ? static_cast<void*>(&s_fakeCtx) : nullptr;
 }
 
-void logosdelivery_set_event_callback(void* /*ctx*/, logosdelivery_callback /*cb*/, void* /*userData*/) {
+void logosdelivery_set_event_callback(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
     LOGOS_CMOCK_RECORD("logosdelivery_set_event_callback");
+    std::lock_guard<std::mutex> lock(eventCallbackMutex);
+    eventCallback = EventCallback{cb, userData};
 }
 
 int logosdelivery_destroy(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
@@ -165,6 +180,32 @@ int waku_get_connected_peers_info(void* /*ctx*/, logosdelivery_callback cb, void
         }
     }
     return dispatch;
+}
+
+int logosdelivery_channel_create(void* /*ctx*/, logosdelivery_callback cb, void* userData,
+                                 const char* /*channelId*/, const char* /*contentTopic*/, const char* /*senderId*/) {
+    LOGOS_CMOCK_RECORD("logosdelivery_channel_create");
+    invokeOk("logosdelivery_channel_create", cb, userData);
+    return RET_OK;
+}
+
+int logosdelivery_channel_exists(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*channelId*/) {
+    LOGOS_CMOCK_RECORD("logosdelivery_channel_exists");
+    invokeOk("logosdelivery_channel_exists", cb, userData);
+    return RET_OK;
+}
+
+int logosdelivery_channel_send(void* /*ctx*/, logosdelivery_callback cb, void* userData,
+                               const char* /*channelId*/, const char* /*msg*/) {
+    LOGOS_CMOCK_RECORD("logosdelivery_channel_send");
+    invokeOk("logosdelivery_channel_send", cb, userData);
+    return RET_OK;
+}
+
+int logosdelivery_channel_close(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*channelId*/) {
+    LOGOS_CMOCK_RECORD("logosdelivery_channel_close");
+    invokeOk("logosdelivery_channel_close", cb, userData);
+    return RET_OK;
 }
 
 int logosdelivery_get_node_info(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*attributeName*/) {
@@ -294,4 +335,28 @@ extern "C" void mock_delivery_reset_held_callbacks()
     holdNextStartCallback = false;
     holdNextStopCallback = false;
     holdNextDestroyCallback = false;
+}
+
+extern "C" const char* mock_delivery_last_create_config()
+{
+    static thread_local std::string config;
+    std::lock_guard<std::mutex> lock(eventCallbackMutex);
+    config = lastCreateConfig;
+    return config.c_str();
+}
+
+extern "C" bool mock_delivery_emit_event(int callerResult, const char* eventJson)
+{
+    EventCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(eventCallbackMutex);
+        if (!eventCallback || !eventCallback->callback) {
+            return false;
+        }
+        callback = *eventCallback;
+    }
+
+    const std::string event = eventJson ? eventJson : "";
+    callback.callback(callerResult, event.c_str(), event.size(), callback.userData);
+    return true;
 }

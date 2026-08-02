@@ -41,45 +41,116 @@ jobs:
           "$temp_dir/actionlint" -color .github/workflows/ci.yml .github/workflows/release.yml
 
   build-and-test:
+    environment: ${{ github.ref == 'refs/heads/master' && 'public-cache' || '' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Check Attic cache credentials
-        id: attic_credentials
-        shell: bash
-        env:
-          ATTIC_ENDPOINT: ${{ secrets.ATTIC_ENDPOINT }}
-          ATTIC_TOKEN_PUBLIC: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
-        run: |
-          if [[ -n "$ATTIC_ENDPOINT" && -n "$ATTIC_TOKEN_PUBLIC" ]]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Setup Attic cache
-        if: ${{ steps.attic_credentials.outputs.configured == 'true' }}
-        uses: ryanccn/attic-action@v0
+      - name: Setup Nix and Logos cache
+        uses: logos-co/setup-nix-cache-action@v1
         with:
-          endpoint: ${{ secrets.ATTIC_ENDPOINT }}
-          cache: public
-          token: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
-          skip-push: ${{ github.event_name == 'pull_request' }}
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
 
       - name: Build portable package
         run: nix build .#lgx-portable -L
 
       - name: Run tests
         run: nix build .#unit-tests -L
+
+      - name: Pre-warm cache for install-portable
+        if: matrix.os == 'ubuntu-latest'
+        run: nix build -L .#install-portable
+
+  e2e-tests:
+    environment: ${{ github.ref == 'refs/heads/master' && 'public-cache' || '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Nix and Logos cache
+        uses: logos-co/setup-nix-cache-action@v1
+        with:
+          attic-token-ci: ${{ secrets.ATTIC_TOKEN_CI }}
+          attic-token-public: ${{ secrets.ATTIC_TOKEN_PUBLIC }}
+
+      # The gha cache backend needs the docker-container driver;
+      # the default docker driver can't export type=gha.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # type=gha needs ACTIONS_RUNTIME_TOKEN/ACTIONS_CACHE_URL, which
+      # GitHub only injects into actions — this exposes them to run
+      # steps, so buildx invoked from build_smoke_image.sh can reach
+      # the cache API. Without it the gha cache is silently a no-op.
+      - name: Expose Actions runtime for buildx gha cache
+        uses: crazy-max/ghaction-github-runtime@v3
+
+      - name: Build delivery-module (install-portable layout)
+        run: |
+          nix build -L .#install-portable
+          echo "LOGOS_MODULES_DIR=$PWD/result/modules" >> "$GITHUB_ENV"
+
+      - name: Checkout logoscore-py and build smoke image
+        env:
+          BUILDX_CACHE_FROM: type=gha
+          BUILDX_CACHE_TO: type=gha,mode=max
+        run: |
+          git clone https://github.com/logos-co/logos-logoscore-py.git /tmp/logoscore-py
+          cd /tmp/logoscore-py
+          git checkout a58573eb2c33916c0da2ba08ecb1ceca2fbb7617
+          bash tests/docker_smoke/build_smoke_image.sh
+          echo "LOGOSCORE_IMAGE=logoscore:smoke-portable" >> "$GITHUB_ENV"
+
+      - name: Build logoscore CLI binary (host PATH)
+        # Must match the daemon commit baked into the smoke image above.
+        run: |
+          nix build -L --out-link /tmp/logoscore-cli "github:logos-co/logos-logoscore-cli/665ac28bc77f45e3c610f40fef975a12609de531#cli"
+          echo "/tmp/logoscore-cli/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: tests/e2e/requirements.txt
+
+      - name: Install e2e test dependencies
+        run: |
+          cd tests/e2e
+          pip install -r requirements.txt
+
+      - name: Run e2e tests
+        run: |
+          mkdir -p ${{ runner.temp }}/e2e-logs
+          cd tests/e2e
+          pytest -v
+        env:
+          E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
+          LOGOSCORE_PY_FORWARD_OUTPUT: "1"
+
+      - name: Collect docker container logs on failure
+        if: failure()
+        run: |
+          mkdir -p ${{ runner.temp }}/e2e-logs
+          for c in $(docker ps -a --filter "name=logoscore-a" --filter "name=logoscore-b" --filter "name=logoscore-solo" -q); do
+            name=$(docker inspect --format '{{.Name}}' "$c" | tr -d '/')
+            docker logs "$c" > "${{ runner.temp }}/e2e-logs/${name}.log" 2>&1 || true
+          done
+
+      - name: Upload daemon logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-logs
+          path: ${{ runner.temp }}/e2e-logs/*.log
+          retention-days: 7

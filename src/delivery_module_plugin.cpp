@@ -3,8 +3,10 @@
 #include <atomic>
 #include <climits>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <ctime>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -17,7 +19,13 @@
 #include <boost/beast/core/detail/base64.hpp>
 
 #include "api_call_handler.h"
+extern "C" {
+#include <liblogosdelivery.h>
+// Kernel tier: unstable, may change without a deprecation cycle. Only
+// waku_store_query is consumed from it; everything else goes through the
+// stable surface above.
 #include <liblogosdelivery_kernel.h>
+}
 
 namespace {
 namespace b64 = boost::beast::detail::base64;
@@ -118,6 +126,45 @@ json nodeLifecycleError(const std::string& code,
         {"occurred_at_ms", occurredAtMs},
     };
 }
+
+// message_received producers use a JSON array of byte values. Keep accepting
+// the base64 form previously accepted by this module for compatibility.
+std::vector<uint8_t> decodeByteArrayPayload(const nlohmann::json& payloadValue) {
+    if (!payloadValue.is_array()) {
+        return {};
+    }
+    std::vector<uint8_t> payloadBytes;
+    payloadBytes.reserve(payloadValue.size());
+    for (const auto& val : payloadValue) {
+        if (!val.is_number_integer()) {
+            return {};
+        }
+        auto byte = val.get<int64_t>();
+        if (byte < 0 || byte > 255) {
+            return {};
+        }
+        payloadBytes.push_back(static_cast<uint8_t>(byte));
+    }
+    return payloadBytes;
+}
+
+// channel_message_received: base64 string.
+std::vector<uint8_t> decodeBase64Payload(const nlohmann::json& payloadValue) {
+    if (!payloadValue.is_string()) {
+        return {};
+    }
+    return base64Decode(payloadValue.get<std::string>());
+}
+
+std::vector<uint8_t> decodeMessageReceivedPayload(const nlohmann::json& payloadValue) {
+    if (payloadValue.is_array()) {
+        return decodeByteArrayPayload(payloadValue);
+    }
+    if (payloadValue.is_string()) {
+        return decodeBase64Payload(payloadValue);
+    }
+    return {};
+}
 } // namespace
 
 void DeliveryModuleImpl::start_callback(int callerRet, const char* msg, size_t len, void* userData)
@@ -204,81 +251,156 @@ void DeliveryModuleImpl::event_callback(int callerRet, const char* msg, size_t l
         std::string message(msg, len);
         fprintf(stderr, "DeliveryModuleImpl::event_callback message: %s\n", message.c_str());
 
-        nlohmann::json jsonObj;
+        // This function is a C callback invoked from the Nim runtime: a C++
+        // exception escaping here would unwind into Nim frames and terminate
+        // the process. Catch the whole nlohmann exception hierarchy (parse
+        // errors and type mismatches from .value()/.get()) and drop the event.
         try {
-            jsonObj = nlohmann::json::parse(message);
-        } catch (const nlohmann::json::parse_error&) {
-            fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid JSON\n");
-            return;
-        }
+            nlohmann::json jsonObj = nlohmann::json::parse(message);
 
-        if (!jsonObj.is_object()) {
-            fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid JSON\n");
-            return;
-        }
-
-        std::string eventType = jsonObj.value("eventType", "");
-        int64_t timestamp = currentTimestampNs();
-
-        if (eventType == "message_sent") {
-            impl->messageSent(
-                jsonObj.value("requestId", ""),
-                jsonObj.value("messageHash", ""),
-                timestamp);
-
-        } else if (eventType == "message_error") {
-            impl->messageError(
-                jsonObj.value("requestId", ""),
-                jsonObj.value("messageHash", ""),
-                jsonObj.value("error", ""),
-                timestamp);
-
-        } else if (eventType == "message_propagated") {
-            impl->messagePropagated(
-                jsonObj.value("requestId", ""),
-                jsonObj.value("messageHash", ""),
-                timestamp);
-
-        } else if (eventType == "message_received") {
-            auto msgObj = jsonObj.value("message", nlohmann::json::object());
-
-            std::string hash = jsonObj.value("messageHash", "");
-            std::string topic = msgObj.value("contentTopic", "");
-
-            std::vector<uint8_t> payloadBytes;
-            if (msgObj.contains("payload")) {
-                auto& payloadValue = msgObj["payload"];
-                if (payloadValue.is_array()) {
-                    payloadBytes.reserve(payloadValue.size());
-                    for (const auto& val : payloadValue) {
-                        payloadBytes.push_back(static_cast<uint8_t>(val.get<int>()));
-                    }
-                } else if (payloadValue.is_string()) {
-                    payloadBytes = base64Decode(payloadValue.get<std::string>());
-                }
+            if (!jsonObj.is_object()) {
+                fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid JSON\n");
+                return;
             }
 
-            int64_t msgTimestamp = static_cast<int64_t>(msgObj.value("timestamp", 0.0));
-            impl->messageReceived(hash, topic, payloadBytes, msgTimestamp);
+            std::string eventType = jsonObj.value("eventType", "");
+            int64_t timestamp = currentTimestampNs();
 
-        } else if (eventType == "connection_status_change") {
-            impl->connectionStateChanged(
-                jsonObj.value("connectionStatus", ""),
-                timestamp);
+            if (eventType == "message_sent") {
+                impl->messageSent(
+                    jsonObj.value("requestId", ""),
+                    jsonObj.value("messageHash", ""),
+                    timestamp);
 
-        } else {
-            fprintf(stderr, "DeliveryModuleImpl::event_callback: Unknown event type: %s\n", eventType.c_str());
+            } else if (eventType == "message_error") {
+                impl->messageError(
+                    jsonObj.value("requestId", ""),
+                    jsonObj.value("messageHash", ""),
+                    jsonObj.value("error", ""),
+                    timestamp);
+
+            } else if (eventType == "message_propagated") {
+                impl->messagePropagated(
+                    jsonObj.value("requestId", ""),
+                    jsonObj.value("messageHash", ""),
+                    timestamp);
+
+            } else if (eventType == "message_received") {
+                auto msgObj = jsonObj.value("message", nlohmann::json::object());
+
+                std::string hash = jsonObj.value("messageHash", "");
+                std::string topic = msgObj.value("contentTopic", "");
+
+                std::vector<uint8_t> payloadBytes;
+                if (msgObj.contains("payload")) {
+                    payloadBytes = decodeMessageReceivedPayload(msgObj["payload"]);
+                }
+
+                int64_t msgTimestamp = static_cast<int64_t>(msgObj.value("timestamp", 0.0));
+                impl->messageReceived(hash, topic, payloadBytes, msgTimestamp);
+
+            } else if (eventType == "connection_status_change") {
+                impl->connectionStateChanged(
+                    jsonObj.value("connectionStatus", ""),
+                    timestamp);
+
+            } else if (eventType == "channel_message_received") {
+                std::vector<uint8_t> payloadBytes;
+                if (jsonObj.contains("payload")) {
+                    payloadBytes = decodeBase64Payload(jsonObj["payload"]);
+                }
+                impl->channelMessageReceived(
+                    jsonObj.value("channelId", ""),
+                    jsonObj.value("senderId", ""),
+                    payloadBytes,
+                    timestamp);
+
+            } else if (eventType == "channel_message_sent") {
+                impl->channelMessageSent(
+                    jsonObj.value("channelId", ""),
+                    jsonObj.value("requestId", ""),
+                    timestamp);
+
+            } else if (eventType == "channel_message_error") {
+                impl->channelMessageError(
+                    jsonObj.value("channelId", ""),
+                    jsonObj.value("requestId", ""),
+                    jsonObj.value("error", ""),
+                    timestamp);
+
+            } else {
+                fprintf(stderr, "DeliveryModuleImpl::event_callback: Unknown event type: %s\n", eventType.c_str());
+            }
+        } catch (const nlohmann::json::exception& e) {
+            fprintf(stderr, "DeliveryModuleImpl::event_callback: Invalid event JSON: %s\n", e.what());
         }
     }
 }
 
-// Default every listening port (tcpPort, discv5UdpPort, restPort,
-// metricsServerPort, websocketPort) to 0 so the OS assigns an ephemeral port
-// when the caller did not pin a specific value. Caller-supplied ports are
-// preserved so fleet configs that pin ports keep working. logos-delivery now
-// accepts port 0 (status-im/nim-confutils#146), which makes this work.
-// See logos-delivery-module#18.
-static std::optional<std::string> applyPortDefaults(const std::string& cfg)
+static std::string toLowerCopy(std::string s)
+{
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// Case-insensitive key lookup, matching keys the same way as the upstream
+// conf parser. Returns the key as spelled in the config.
+static std::optional<std::string> findKey(const nlohmann::json& cfgObj,
+                                          std::initializer_list<const char*> names)
+{
+    for (const auto& entry : cfgObj.items()) {
+        const std::string key = toLowerCopy(entry.key());
+        for (const char* name : names) {
+            if (key == name) return entry.key();
+        }
+    }
+    return std::nullopt;
+}
+
+// True when the config is the legacy flat shape: any top-level key besides the
+// ones the layered parser consumes marks a bare WakuNodeConf field.
+static bool isFlatShape(const nlohmann::json& cfgObj)
+{
+    for (const auto& entry : cfgObj.items()) {
+        const std::string key = toLowerCopy(entry.key());
+        if (key != "entrylayer" && key != "mode" && key != "preset"
+            && key != "kernelconf" && key != "messagingoverrides"
+            && key != "channelsoverrides") {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void defaultRawPort(nlohmann::json& cfgObj,
+                           const char* canonicalKey,
+                           std::initializer_list<const char*> acceptedKeys)
+{
+    if (!findKey(cfgObj, acceptedKeys)) {
+        cfgObj[canonicalKey] = 0;
+    }
+}
+
+// Raw WakuNodeConf configurations retain the module's ephemeral port policy so
+// multiple module instances can share a host. Structured configurations do not
+// receive these raw keys: the delivery parser gives their MessagingClientConf
+// transport fields ephemeral defaults and rejects raw REST/metrics fields.
+static void applyRawPortDefaults(nlohmann::json& cfgObj)
+{
+    defaultRawPort(cfgObj, "tcpPort", {"tcpport", "tcp-port"});
+    defaultRawPort(cfgObj, "discv5UdpPort", {"discv5udpport", "discv5-udp-port"});
+    defaultRawPort(cfgObj, "restPort", {"restport", "rest-port"});
+    defaultRawPort(cfgObj, "metricsServerPort", {"metricsserverport", "metrics-server-port"});
+    defaultRawPort(cfgObj, "websocketPort", {"websocketport", "websocket-port"});
+}
+
+// Defaults raw node ports to ephemeral values and the storage directory to the
+// host's per-instance path. Raw fields belong at the top level for legacy
+// flat configurations and in kernelConf for kernel-only configurations.
+// Structured configurations stay unchanged: MessagingClientConf rejects the
+// raw storage field, and it has no equivalent per-instance storage setting.
+static std::optional<std::string> applyConfigDefaults(const std::string& cfg,
+                                                      const std::string& persistencePath)
 {
     nlohmann::json cfgObj;
     try {
@@ -293,16 +415,25 @@ static std::optional<std::string> applyPortDefaults(const std::string& cfg)
         return std::nullopt;
     }
 
-    for (const char* portKey : {
-             "tcpPort",
-             "discv5UdpPort",
-             "restPort",
-             "metricsServerPort",
-             "websocketPort",
-         }) {
-        if (!cfgObj.contains(portKey)) {
-            cfgObj[portKey] = 0;
-        }
+    const auto entryLayerKey = findKey(cfgObj, {"entrylayer"});
+    const bool kernelEntry = entryLayerKey && cfgObj[*entryLayerKey].is_string()
+        && toLowerCopy(cfgObj[*entryLayerKey].get<std::string>()) == "kernel";
+    const bool flatShape = isFlatShape(cfgObj);
+
+    nlohmann::json* kernelTarget = nullptr;
+    if (auto kernelConfKey = findKey(cfgObj, {"kernelconf"});
+        kernelConfKey && cfgObj[*kernelConfKey].is_object()) {
+        kernelTarget = &cfgObj[*kernelConfKey];
+    } else if (!kernelEntry && flatShape) {
+        kernelTarget = &cfgObj;
+    }
+    if (kernelTarget) {
+        applyRawPortDefaults(*kernelTarget);
+    }
+
+    if (kernelTarget && !persistencePath.empty()
+        && !findKey(*kernelTarget, {"localstoragepath", "local-storage-path"})) {
+        (*kernelTarget)["localStoragePath"] = persistencePath + "/data";
     }
 
     return cfgObj.dump();
@@ -735,7 +866,7 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
     // Don't log cfg: it can carry sensitive config.
     fprintf(stderr, "DeliveryModuleImpl::createNode called\n");
 
-    auto cfgWithDefaults = applyPortDefaults(cfg);
+    auto cfgWithDefaults = applyConfigDefaults(cfg, instancePersistencePath());
     if (!cfgWithDefaults) {
         const StdLogosResult result{false, {}, "Invalid JSON config"};
         settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
@@ -1211,15 +1342,16 @@ StdLogosResult DeliveryModuleImpl::unsubscribe(const std::string& contentTopic)
     return outcome;
 }
 
-StdLogosResult DeliveryModuleImpl::storeQuery(
-    const std::string& queryJson,
-    const std::string& peerAddr,
-    int64_t timeoutMs)
+StdLogosResult DeliveryModuleImpl::storeQuery(const std::string& jsonQuery,
+                                              const std::string& peerAddr,
+                                              int64_t timeoutMs)
 {
+    fprintf(stderr, "DeliveryModuleImpl::storeQuery called with peerAddr: %s\n", peerAddr.c_str());
     if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot run store query - context not initialized. Call createNode first.\n");
         return {false, {}, "Context not initialized"};
     }
-    if (queryJson.empty()) {
+    if (jsonQuery.empty()) {
         return {false, {}, "Store query JSON must not be empty"};
     }
     if (peerAddr.empty()) {
@@ -1229,18 +1361,21 @@ StdLogosResult DeliveryModuleImpl::storeQuery(
         return {false, {}, "Store query timeout must be a positive 32-bit integer"};
     }
 
+    // timeoutMs bounds the query on the FFI side; wait longer than that for the
+    // completion callback so the query's own timeout error reaches the caller
+    // instead of a callback timeout.
+    auto callbackTimeout = std::max(
+        CALLBACK_TIMEOUT, std::chrono::seconds(timeoutMs / 1000 + 5));
+
     auto outcome = callApiRetValue(
         "store_query",
-        std::chrono::milliseconds(timeoutMs),
-        bindApiCall(
-            waku_store_query,
-            deliveryCtx,
-            queryJson.c_str(),
-            peerAddr.c_str(),
-            static_cast<int>(timeoutMs)));
+        callbackTimeout,
+        bindApiCall(waku_store_query, deliveryCtx,
+                    jsonQuery.c_str(), peerAddr.c_str(), static_cast<int>(timeoutMs)));
+
     if (!outcome.success) {
-        fprintf(stderr, "DeliveryModuleImpl: Store query failed: %s\n",
-                outcome.error.c_str());
+        fprintf(stderr, "DeliveryModuleImpl: Store query failed for peer: %s, reason: %s\n",
+                peerAddr.c_str(), outcome.error.c_str());
     }
     return outcome;
 }
@@ -1265,28 +1400,104 @@ StdLogosResult DeliveryModuleImpl::getConnectedPeersInfo()
     return outcome;
 }
 
-std::string DeliveryModuleImpl::version() const {
-    std::string moduleVersion = "0.1.10";
+StdLogosResult DeliveryModuleImpl::channelCreate(const std::string& channelId,
+                                                 const std::string& contentTopic,
+                                                 const std::string& senderId)
+{
+    fprintf(stderr, "DeliveryModuleImpl::channelCreate called with channelId: %s, contentTopic: %s\n",
+            channelId.c_str(), contentTopic.c_str());
+
     if (!deliveryCtx) {
-        fprintf(stderr, "DeliveryModuleImpl: Cannot get version - context not initialized. Call createNode first.\n");
-        return moduleVersion + " (liblogosdelivery version unknown, context not initialized)";
+        fprintf(stderr, "DeliveryModuleImpl: Cannot create channel - context not initialized. Call createNode first.\n");
+        return {false, {}, "Context not initialized"};
     }
 
-    auto liblogosDeliveryVersion = callApiRetValue(
-        "get_node_info",
+    auto outcome = callApiRetValue(
+        "channel_create",
         CALLBACK_TIMEOUT,
-        bindApiCall(logosdelivery_get_node_info, deliveryCtx, "Version"));
+        bindApiCall(logosdelivery_channel_create, deliveryCtx,
+                    channelId.c_str(), contentTopic.c_str(), senderId.c_str()));
 
-    if (!liblogosDeliveryVersion.success) {
-        fprintf(stderr, "DeliveryModuleImpl: Get node info failed getting version, reason: %s\n",
-                liblogosDeliveryVersion.error.c_str());
-        return moduleVersion + " (liblogosdelivery version unknown)";
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel create failed for id: %s, reason: %s\n",
+                channelId.c_str(), outcome.error.c_str());
+    }
+    return outcome;
+}
+
+StdLogosResult DeliveryModuleImpl::channelExists(const std::string& channelId)
+{
+    fprintf(stderr, "DeliveryModuleImpl::channelExists called with channelId: %s\n", channelId.c_str());
+
+    if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot query channel - context not initialized. Call createNode first.\n");
+        return {false, {}, "Context not initialized"};
     }
 
-    std::string ver = liblogosDeliveryVersion.value.get<std::string>();
-    fprintf(stderr, "DeliveryModuleImpl: Get node info completed for attribute: Version, with success: %s\n", ver.c_str());
+    auto outcome = callApiRetValue(
+        "channel_exists",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_channel_exists, deliveryCtx, channelId.c_str()));
 
-    return moduleVersion + " (liblogosdelivery version: " + ver + ")";
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel exists failed for id: %s, reason: %s\n",
+                channelId.c_str(), outcome.error.c_str());
+    }
+    return outcome;
+}
+
+StdLogosResult DeliveryModuleImpl::channelSend(const std::string& channelId, const std::vector<uint8_t>& payload)
+{
+    fprintf(stderr, "DeliveryModuleImpl::channelSend called with channelId: %s\n", channelId.c_str());
+
+    if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot send channel message - context not initialized. Call createNode first.\n");
+        return {false, {}, "Context not initialized"};
+    }
+
+    nlohmann::json messageObj;
+    messageObj["payload"] = base64Encode(payload);
+    messageObj["ephemeral"] = false;
+
+    std::string messageJson = messageObj.dump();
+
+    auto outcome = callApiRetValue(
+        "channel_send",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_channel_send, deliveryCtx,
+                    channelId.c_str(), messageJson.c_str()));
+
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel send failed for id: %s, reason: %s\n",
+                channelId.c_str(), outcome.error.c_str());
+    }
+
+    if (outcome.success && outcome.value.is_string()) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel send initiated for id: %s, with success, requestId: %s\n",
+                channelId.c_str(), outcome.value.get<std::string>().c_str());
+    }
+    return outcome;
+}
+
+StdLogosResult DeliveryModuleImpl::channelClose(const std::string& channelId)
+{
+    fprintf(stderr, "DeliveryModuleImpl::channelClose called with channelId: %s\n", channelId.c_str());
+
+    if (!deliveryCtx) {
+        fprintf(stderr, "DeliveryModuleImpl: Cannot close channel - context not initialized.\n");
+        return {false, {}, "Context not initialized"};
+    }
+
+    auto outcome = callApiRetVoid(
+        "channel_close",
+        CALLBACK_TIMEOUT,
+        bindApiCall(logosdelivery_channel_close, deliveryCtx, channelId.c_str()));
+
+    if (!outcome.success) {
+        fprintf(stderr, "DeliveryModuleImpl: Channel close failed for id: %s, reason: %s\n",
+                channelId.c_str(), outcome.error.c_str());
+    }
+    return outcome;
 }
 
 StdLogosResult DeliveryModuleImpl::getAvailableNodeInfoIDs() {
