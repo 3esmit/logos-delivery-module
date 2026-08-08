@@ -9,7 +9,7 @@
   };
 
   inputs = {
-    logos-module-builder.url = "github:logos-co/logos-module-builder/0.2.5";
+    logos-module-builder.url = "github:3esmit/logos-module-builder?rev=8e4ea1c1d0e523cea46850f8fd9466dd35af7cc1";
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
     logos-delivery.url = "git+https://github.com/3esmit/logos-delivery?rev=5e625eb23802617a7a90ec9668a4813a4a7855de&submodules=1";
   };

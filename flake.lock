@@ -6293,15 +6293,15 @@
       "locked": {
         "lastModified": 1785067112,
         "narHash": "sha256-hNSNXMaeI/gBM+U+AfYpdpXtO3SvEg3b4iZ5RG0kWBs=",
-        "owner": "logos-co",
+        "owner": "3esmit",
         "repo": "logos-module-builder",
         "rev": "8e4ea1c1d0e523cea46850f8fd9466dd35af7cc1",
         "type": "github"
       },
       "original": {
-        "owner": "logos-co",
-        "ref": "0.2.5",
+        "owner": "3esmit",
         "repo": "logos-module-builder",
+        "rev": "8e4ea1c1d0e523cea46850f8fd9466dd35af7cc1",
         "type": "github"
       }
     },
