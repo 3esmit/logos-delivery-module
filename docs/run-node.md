@@ -83,9 +83,16 @@ mkdir -p packages modules
 lgpd download delivery_module --output ./packages
 lgpm install --dir ./packages --modules-dir ./modules
 
-# logos.test node config
+# logos.test node config (layered createNode shape — see Configuration below)
 cat > logos-test.json <<'JSON'
-{ "preset": "logos.test", "logLevel": "DEBUG" }
+{
+  "preset": "logos.test",
+  "messagingOverrides": {
+    "logLevel": "DEBUG",
+    "tcp-port": 30303,
+    "discv5-udp-port": 9000
+  }
+}
 JSON
 
 # Run the daemon (it binds capability_module automatically, so ./modules only
@@ -169,16 +176,23 @@ logoscore stop
 
 ## Configuration
 
-The node config is just the `logos.test` network preset. The repo ships it as
-[`conf/logos-test.json`](../conf/logos-test.json): with Docker it is mounted
-into the container at `/conf` (`@/conf/logos-test.json`); with the Nix build,
-pass the path directly (`@conf/logos-test.json`). The prebuilt-binaries path
-above writes the same config inline as `logos-test.json` so no clone is needed.
-Edit it and re-run the boot steps to change settings.
+The config uses the layered `createNode` shape: `preset` picks the network,
+`mode` defaults to `"Core"` (`"Edge"` for a light node), per-layer settings
+go in `messagingOverrides`. The repo ships it as
+[`conf/logos-test.json`](../conf/logos-test.json): Docker mounts it into the
+container at `/conf` (`@/conf/logos-test.json`); with the Nix build, pass the
+path directly (`@conf/logos-test.json`). The prebuilt-binaries path above
+writes the same config inline. Edit it and re-run the boot steps to change
+settings.
 
-To target the dev network instead, use
-[`conf/logos-dev.json`](../conf/logos-dev.json) (preset `logos.dev`). Available
-keys are documented in the
+Keep extra keys inside `messagingOverrides` / `channelsOverrides` /
+`kernelConf` — a bare top-level key (even `logLevel`) switches parsing to the
+legacy flat shape. Unpinned listening ports are OS-assigned; the config pins
+the p2p ports to match the Docker port mappings.
+
+For the dev network, use [`conf/logos-dev.json`](../conf/logos-dev.json)
+(preset `logos.dev`). The full config grammar, including kernel-only nodes
+(`"entryLayer": "kernel"`), is documented in the
 [README](../README.md#node-configuration-createnode).
 
 The node is now connected to the `logos.test` network. See
