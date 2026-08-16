@@ -1,4 +1,8 @@
 {
     "preset": "logos.test",
-    "logLevel":"DEBUG"
+    "messagingOverrides": {
+        "logLevel": "DEBUG",
+        "tcp-port": 30303,
+        "discv5-udp-port": 9000
+    }
 }
