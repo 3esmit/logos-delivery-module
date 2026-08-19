@@ -11,7 +11,7 @@
   inputs = {
     logos-module-builder.url = "github:3esmit/logos-module-builder?rev=324b459c3f7b59171d249f3ccbcc362403b3fcaf";
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
-    logos-delivery.url = "git+https://github.com/3esmit/logos-delivery?rev=3916ba00971dc26396e57b18e88c10d4fa351fe9&submodules=1";
+    logos-delivery.url = "git+https://github.com/3esmit/logos-delivery?rev=cddfcd61ac7b36d0da78ddfb9175ad277bf1dec9&submodules=1";
   };
 
   outputs = inputs@{ logos-module-builder, ... }:
