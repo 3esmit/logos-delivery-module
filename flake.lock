@@ -3825,17 +3825,17 @@
         "zerokit": "zerokit"
       },
       "locked": {
-        "lastModified": 1785656537,
-        "narHash": "sha256-lo436nHecwsYVVNDCfaRO2jkv7F2nbuQ+ABC5Xw3z98=",
+        "lastModified": 1787155449,
+        "narHash": "sha256-pUV9SG7VriKDYCNglaGLVWe1r7wjTwD+S9YPyKYY2xI=",
         "ref": "refs/heads/master",
-        "rev": "5e625eb23802617a7a90ec9668a4813a4a7855de",
-        "revCount": 2462,
+        "rev": "3916ba00971dc26396e57b18e88c10d4fa351fe9",
+        "revCount": 2495,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/3esmit/logos-delivery"
       },
       "original": {
-        "rev": "5e625eb23802617a7a90ec9668a4813a4a7855de",
+        "rev": "3916ba00971dc26396e57b18e88c10d4fa351fe9",
         "submodules": true,
         "type": "git",
         "url": "https://github.com/3esmit/logos-delivery"
