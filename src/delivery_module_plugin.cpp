@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <initializer_list>
 #include <memory>
@@ -193,16 +194,6 @@ bool lifecycleCallbackSucceeded(int callerRet,
         return false;
     }
     message = (msg && len > 0) ? std::string(msg, len) : std::string();
-    if (message.empty()) {
-        return true;
-    }
-
-    const auto decoded = decodeCborTextResponse(message);
-    if (!decoded) {
-        message = "Delivery lifecycle callback returned invalid CBOR text.";
-        return false;
-    }
-    message = *decoded;
     return true;
 }
 } // namespace
@@ -245,6 +236,7 @@ void DeliveryModuleImpl::stop_callback(int callerRet, const char* msg, size_t le
 
 DeliveryModuleImpl::DeliveryModuleImpl()
     : deliveryCtx(nullptr),
+      deliveryContextHandle(nullptr),
       eventCallbackContext(std::make_unique<EventCallbackContext>()),
       eventCallbackHandle(std::make_unique<EventCallbackHandle>()),
       lifecycleInstanceId(makeNodeLifecycleInstanceId()),
@@ -361,6 +353,23 @@ bool DeliveryModuleImpl::removeEventListeners()
     return eventListenerIds.empty();
 }
 
+int DeliveryModuleImpl::destroyDeliveryContext()
+{
+    if (!deliveryCtx) {
+        std::free(deliveryContextHandle);
+        deliveryContextHandle = nullptr;
+        return RET_OK;
+    }
+
+    const int result = logosdelivery_destroy(deliveryCtx);
+    if (result == RET_OK) {
+        std::free(deliveryContextHandle);
+        deliveryContextHandle = nullptr;
+        deliveryCtx = nullptr;
+    }
+    return result;
+}
+
 DeliveryModuleImpl::~DeliveryModuleImpl()
 {
     closeEventCallbackContext();
@@ -398,15 +407,14 @@ DeliveryModuleImpl::~DeliveryModuleImpl()
         // unresolved. Retry that subset once before the single destroy request.
         listenersRemoved = removeEventListeners();
     }
-    if (deliveryCtx) {
-        // liblogosdelivery validates its callback before it tears down the FFI
-        // context. Keep destruction on the same callback path as normal calls;
-        // a null callback is rejected without releasing the context. Do not
-        // retry this request: a failed FFI call may still be in flight.
-        (void)callApiRetVoid(
-            "destroy", CALLBACK_TIMEOUT,
-            bindApiCall(logosdelivery_destroy, deliveryCtx));
-        deliveryCtx = nullptr;
+    if (deliveryCtx || deliveryContextHandle) {
+        // The current C ABI exposes destroy as a synchronous destructor. Do
+        // not route it through the asynchronous callback wrapper.
+        if (destroyDeliveryContext() != RET_OK) {
+            std::free(deliveryContextHandle);
+            deliveryContextHandle = nullptr;
+            deliveryCtx = nullptr;
+        }
     }
     eventCallbackContext->waitForCallbacks();
     retainEventCallbackHandle(std::move(eventCallbackHandle));
@@ -1068,6 +1076,7 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
         std::binary_semaphore sem{0};
         int callerRet{RET_ERR};
         std::string message;
+        LogosDeliveryCtx* context{nullptr};
     };
 
     static std::mutex pendingMutex;
@@ -1081,7 +1090,10 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
         pendingContexts[callbackKey] = callbackCtx;
     }
 
-    auto callback = +[](int callerRet, const char* msg, size_t len, void* userData) {
+    auto callback = +[](int callerRet,
+                        LogosDeliveryCtx* context,
+                        const char* msg,
+                        void* userData) {
         fprintf(stderr, "DeliveryModuleImpl::createNode callback called with ret: %d\n", callerRet);
 
         if (!isTerminalLifecycleCallbackResult(callerRet)) {
@@ -1093,6 +1105,10 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
             std::lock_guard<std::mutex> lock(pendingMutex);
             auto it = pendingContexts.find(userData);
             if (it == pendingContexts.end()) {
+                if (context) {
+                    (void)logosdelivery_destroy(context->ptr);
+                    std::free(context);
+                }
                 return;
             }
             callbackCtx = it->second;
@@ -1104,15 +1120,29 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
         }
 
         callbackCtx->callerRet = callerRet;
-        if (msg && len > 0) {
-            callbackCtx->message = std::string(msg, len);
+        callbackCtx->context = context;
+        if (msg) {
+            callbackCtx->message = msg;
             fprintf(stderr, "DeliveryModuleImpl::createNode callback message: %s\n", callbackCtx->message.c_str());
         }
 
         callbackCtx->sem.release();
     };
 
-    deliveryCtx = logosdelivery_create_node(cfgWithPorts.c_str(), callback, callbackKey);
+    const int createDispatchResult = logosdelivery_ctx_create(
+        cfgWithPorts.c_str(), callback, callbackKey);
+
+    if (createDispatchResult != RET_OK) {
+        std::lock_guard<std::mutex> lock(pendingMutex);
+        pendingContexts.erase(callbackKey);
+
+        fprintf(stderr, "DeliveryModuleImpl: Failed to initiate createNode\n");
+        const StdLogosResult result{false, {}, "Failed to initiate createNode"};
+        settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
+                              dispatch.previousState, LifecycleState::Stopped,
+                              LifecycleState::Uninitialized, false);
+        return result;
+    }
 
     fprintf(stderr, "DeliveryModuleImpl: Waiting for createNode callback...\n");
 
@@ -1121,6 +1151,7 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
         pendingContexts.erase(callbackKey);
 
         deliveryCtx = nullptr;
+        deliveryContextHandle = nullptr;
 
         fprintf(stderr, "DeliveryModuleImpl: Timeout waiting for createNode callback\n");
         const StdLogosResult result{false, {}, "Timeout waiting for createNode callback"};
@@ -1130,12 +1161,17 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
         return result;
     }
 
-    if (callbackCtx->callerRet != RET_OK || deliveryCtx == nullptr) {
+    if (callbackCtx->callerRet != RET_OK || callbackCtx->context == nullptr) {
         if (!callbackCtx->message.empty()) {
             fprintf(stderr, "DeliveryModuleImpl: createNode callback error: %s\n", callbackCtx->message.c_str());
         }
 
+        if (callbackCtx->context) {
+            (void)logosdelivery_destroy(callbackCtx->context->ptr);
+            std::free(callbackCtx->context);
+        }
         deliveryCtx = nullptr;
+        deliveryContextHandle = nullptr;
 
         fprintf(stderr, "DeliveryModuleImpl: Failed to create Delivery context\n");
         const StdLogosResult result{false, {}, "Failed to create Delivery context"};
@@ -1144,6 +1180,9 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
                               LifecycleState::Uninitialized, false);
         return result;
     }
+
+    deliveryContextHandle = callbackCtx->context;
+    deliveryCtx = callbackCtx->context->ptr;
 
     fprintf(stderr, "DeliveryModuleImpl: Delivery context created successfully\n");
 
@@ -1158,12 +1197,8 @@ StdLogosResult DeliveryModuleImpl::createNodePrepared(
             return result;
         }
 
-        const StdLogosResult cleanupResult = callApiRetVoid(
-            "destroy", CALLBACK_TIMEOUT,
-            bindApiCall(logosdelivery_destroy, deliveryCtx));
-        if (cleanupResult.success) {
-            deliveryCtx = nullptr;
-
+        const int cleanupResult = destroyDeliveryContext();
+        if (cleanupResult == RET_OK) {
             fprintf(stderr, "DeliveryModuleImpl: Failed to register Delivery event listeners\n");
             const StdLogosResult result{false, {}, "Failed to register Delivery event listeners"};
             settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
@@ -1255,8 +1290,8 @@ StdLogosResult DeliveryModuleImpl::startPrepared(const LifecycleDispatch& dispat
 
     // Node start can block for a long time (relay reconnect backoff), so return
     // once dispatched. Completion arrives via nodeStarted.
-    if (logosdelivery_start_node(
-            deliveryCtx, start_callback, eventCallbackHandle.get()) != RET_OK) {
+    if (bindApiCall(logosdelivery_start_node, deliveryCtx)(
+            start_callback, eventCallbackHandle.get()) != RET_OK) {
         const StdLogosResult result{false, {}, "failed to initiate start"};
         settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
                               dispatch.previousState, LifecycleState::Running,
@@ -1276,8 +1311,8 @@ StdLogosResult DeliveryModuleImpl::stopPrepared(const LifecycleDispatch& dispatc
         return result;
     }
 
-    if (logosdelivery_stop_node(
-            deliveryCtx, stop_callback, eventCallbackHandle.get()) != RET_OK) {
+    if (bindApiCall(logosdelivery_stop_node, deliveryCtx)(
+            stop_callback, eventCallbackHandle.get()) != RET_OK) {
         const StdLogosResult result{false, {}, "failed to initiate stop"};
         settleLifecycleAction(dispatch.action, dispatch.operationId, dispatch.generation,
                               dispatch.previousState, LifecycleState::Stopped,
@@ -1308,13 +1343,13 @@ StdLogosResult DeliveryModuleImpl::destroyPrepared(const LifecycleDispatch& disp
 
     // logosdelivery_destroy joins the FFI worker and can block. This runs on a
     // dedicated lifecycle worker so nodeAction() remains an acknowledgement-only
-    // API. The C API requires a callback and reports its terminal result there.
-    StdLogosResult result = callApiRetVoid(
-        "destroy", CALLBACK_TIMEOUT,
-        bindApiCall(logosdelivery_destroy, deliveryCtx));
-    if (result.success) {
-        deliveryCtx = nullptr;
-    } else {
+    // API. The current C ABI reports its terminal result synchronously.
+    const int destroyResult = destroyDeliveryContext();
+    StdLogosResult result{
+        destroyResult == RET_OK,
+        {},
+        destroyResult == RET_OK ? "" : "failed to destroy Delivery context"};
+    if (!result.success) {
         // A failed teardown leaves the context available for retry. Restore
         // its long-lived event listeners after the teardown callback releases
         // the FFI context's event registry lock.

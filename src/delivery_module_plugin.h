@@ -435,6 +435,7 @@ private:
     };
 
     void* deliveryCtx;
+    void* deliveryContextHandle;
     std::unique_ptr<EventCallbackContext> eventCallbackContext;
     std::unique_ptr<EventCallbackHandle> eventCallbackHandle;
     std::vector<std::uint64_t> eventListenerIds;
@@ -481,6 +482,7 @@ private:
 
     bool registerEventListeners();
     bool removeEventListeners();
+    int destroyDeliveryContext();
 
     // Completion callbacks for start()/stop(); emit nodeStarted / nodeStopped.
     // userData is the same guarded EventCallbackHandle used for FFI events.

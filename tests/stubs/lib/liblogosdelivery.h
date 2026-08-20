@@ -1,13 +1,4 @@
-// Stub header for liblogosdelivery - mirrors library/liblogosdelivery.h from
-// logos-delivery (master 5e625eb) so that delivery_module_plugin.cpp compiles
-// during unit tests without the real library. Keep in sync with the real,
-// Nim-build-generated header when bumping the logos-delivery flake input.
-//
-// Note on the channel-events comment below: "onChannelMessageReceived/Sent/
-// Error" are upstream's internal listener labels; the JSON "eventType" values
-// actually delivered to the event callback are "channel_message_received",
-// "channel_message_sent" and "channel_message_error" (see node_api.nim).
-
+// Test stub for the typed C ABI emitted by logos-delivery's nim-ffi backend.
 #pragma once
 #ifndef LOGOS_DELIVERY_TEST_STUB_H
 #define LOGOS_DELIVERY_TEST_STUB_H
@@ -15,146 +6,137 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// The possible returned values for the functions that return int
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define RET_OK 0
 #define RET_ERR 1
 #define RET_MISSING_CALLBACK 2
-// Callback-only progress notification; never a terminal request result.
 #define RET_STALE_WARN 3
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
+typedef void (*FFICallBack)(int callerRet, const char* msg, size_t len, void* userData);
+typedef void (*LogosDeliveryScalarRawFn)(int callerRet, char* msg, size_t len, void* userData);
+typedef void (*LogosDeliveryCreateRawFn)(int callerRet,
+                                         const char* ctxAddress,
+                                         const char* errorMessage,
+                                         void* userData);
 
-  typedef void (*FFICallBack)(int callerRet, const char *msg, size_t len, void *userData);
-  typedef FFICallBack logosdelivery_callback;
+typedef struct {
+    void* ptr;
+} LogosDeliveryCtx;
 
-  // Creates a new instance of the node from the given configuration JSON.
-  // Returns a pointer to the Context needed by the rest of the API functions.
-  // The configuration is a JSON object with these optional keys:
-  //   "mode": "Core" | "Edge"        (messaging role; defaults to "Core")
-  //   "preset": "<network preset>"   (e.g. "twn")
-  //   "messagingOverrides": { ... }  (per-field messaging config overrides)
-  //   "channelsOverrides": { ... }   (per-field reliable-channel overrides)
-  // Override keys accept the config field name or its CLI switch name (e.g.
-  // "clusterId" or "cluster-id"). Unknown keys are rejected.
-  // Example: {"mode":"Core","messagingOverrides":{"cluster-id":42,"log-level":"INFO"}}
-  void *logosdelivery_create_node(
-      const char *configJson,
-      FFICallBack callback,
-      void *userData);
+typedef void (*LogosDeliveryCreateFn)(int callerRet,
+                                      LogosDeliveryCtx* ctx,
+                                      const char* errorMessage,
+                                      void* userData);
 
-  // Starts the node.
-  int logosdelivery_start_node(void *ctx,
-                       FFICallBack callback,
-                       void *userData);
+typedef struct { const char* configJson; } LogosdeliveryCreateNodeCtorReq;
+typedef struct { const char* messageJson; } LogosdeliverySendReq;
+typedef struct { const char* contentTopic; } LogosdeliverySubscribeReq;
+typedef struct { const char* contentTopic; } LogosdeliveryUnsubscribeReq;
+typedef struct {
+    const char* jsonQuery;
+    const char* peerAddr;
+    int32_t timeoutMs;
+} WakuStoreQueryReq;
+typedef struct { uint8_t _placeholder; } WakuGetConnectedPeersInfoReq;
+typedef struct {
+    const char* channelIdStr;
+    const char* contentTopicStr;
+    const char* senderIdStr;
+} LogosdeliveryChannelCreateReq;
+typedef struct { const char* channelIdStr; } LogosdeliveryChannelExistsReq;
+typedef struct {
+    const char* channelIdStr;
+    const char* messageJson;
+} LogosdeliveryChannelSendReq;
+typedef struct { const char* channelIdStr; } LogosdeliveryChannelCloseReq;
+typedef struct { uint8_t _placeholder; } LogosdeliveryGetAvailableNodeInfoIdsReq;
+typedef struct { const char* nodeInfoId; } LogosdeliveryGetNodeInfoReq;
+typedef struct { uint8_t _placeholder; } LogosdeliveryGetAvailableConfigsReq;
 
-  // Stops the node.
-  int logosdelivery_stop_node(void *ctx,
-                      FFICallBack callback,
-                      void *userData);
+typedef void (*LogosdeliverySendReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliverySubscribeReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliveryUnsubscribeReplyFn)(int, const char*, const char*, void*);
+typedef void (*WakuStoreQueryReplyFn)(int, const char*, const char*, void*);
+typedef void (*WakuGetConnectedPeersInfoReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliveryChannelCreateReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliveryChannelExistsReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliveryChannelSendReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliveryChannelCloseReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliveryGetAvailableNodeInfoIdsReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliveryGetNodeInfoReplyFn)(int, const char*, const char*, void*);
+typedef void (*LogosdeliveryGetAvailableConfigsReplyFn)(int, const char*, const char*, void*);
 
-  // Destroys an instance of a node created with logosdelivery_create_node
-  int logosdelivery_destroy(void *ctx,
-                    FFICallBack callback,
-                    void *userData);
+void* logosdelivery_create_node(const LogosdeliveryCreateNodeCtorReq* req,
+                                LogosDeliveryCreateRawFn onCreated,
+                                void* userData);
+int logosdelivery_ctx_create(const char* configJson,
+                             LogosDeliveryCreateFn onCreated,
+                             void* userData);
+int logosdelivery_start_node(void* ctx, LogosDeliveryScalarRawFn callback, void* userData);
+int logosdelivery_stop_node(void* ctx, LogosDeliveryScalarRawFn callback, void* userData);
+int logosdelivery_destroy(void* ctx);
 
-  // Subscribe to a content topic.
-  // contentTopic: string representing the content topic (e.g., "/myapp/1/chat/proto")
-  int logosdelivery_subscribe(void *ctx,
-                      FFICallBack callback,
-                      void *userData,
-                      const char *contentTopic);
+int logosdelivery_send(void* ctx,
+                       LogosdeliverySendReplyFn callback,
+                       void* userData,
+                       const LogosdeliverySendReq* req);
+int logosdelivery_subscribe(void* ctx,
+                            LogosdeliverySubscribeReplyFn callback,
+                            void* userData,
+                            const LogosdeliverySubscribeReq* req);
+int logosdelivery_unsubscribe(void* ctx,
+                              LogosdeliveryUnsubscribeReplyFn callback,
+                              void* userData,
+                              const LogosdeliveryUnsubscribeReq* req);
+int waku_store_query(void* ctx,
+                     WakuStoreQueryReplyFn callback,
+                     void* userData,
+                     const WakuStoreQueryReq* req);
+int waku_get_connected_peers_info(void* ctx,
+                                  WakuGetConnectedPeersInfoReplyFn callback,
+                                  void* userData,
+                                  const WakuGetConnectedPeersInfoReq* req);
+int logosdelivery_channel_create(void* ctx,
+                                 LogosdeliveryChannelCreateReplyFn callback,
+                                 void* userData,
+                                 const LogosdeliveryChannelCreateReq* req);
+int logosdelivery_channel_exists(void* ctx,
+                                 LogosdeliveryChannelExistsReplyFn callback,
+                                 void* userData,
+                                 const LogosdeliveryChannelExistsReq* req);
+int logosdelivery_channel_send(void* ctx,
+                               LogosdeliveryChannelSendReplyFn callback,
+                               void* userData,
+                               const LogosdeliveryChannelSendReq* req);
+int logosdelivery_channel_close(void* ctx,
+                                LogosdeliveryChannelCloseReplyFn callback,
+                                void* userData,
+                                const LogosdeliveryChannelCloseReq* req);
+int logosdelivery_get_available_node_info_ids(
+    void* ctx,
+    LogosdeliveryGetAvailableNodeInfoIdsReplyFn callback,
+    void* userData,
+    const LogosdeliveryGetAvailableNodeInfoIdsReq* req);
+int logosdelivery_get_node_info(void* ctx,
+                                LogosdeliveryGetNodeInfoReplyFn callback,
+                                void* userData,
+                                const LogosdeliveryGetNodeInfoReq* req);
+int logosdelivery_get_available_configs(void* ctx,
+                                        LogosdeliveryGetAvailableConfigsReplyFn callback,
+                                        void* userData,
+                                        const LogosdeliveryGetAvailableConfigsReq* req);
 
-  // Unsubscribe from a content topic.
-  int logosdelivery_unsubscribe(void *ctx,
-                        FFICallBack callback,
-                        void *userData,
-                        const char *contentTopic);
-
-  // Send a message.
-  // messageJson: JSON string with the following structure:
-  // {
-  //   "contentTopic": "/myapp/1/chat/proto",
-  //   "payload": "base64-encoded-payload",
-  //   "ephemeral": false
-  // }
-  // Returns a request ID that can be used to track the message delivery.
-  int logosdelivery_send(void *ctx,
-                 FFICallBack callback,
-                 void *userData,
-                 const char *messageJson);
-
-  // --- Reliable Channels API (stable surface) ---
-
-  // Create a reliable channel. Returns the channel id.
-  int logosdelivery_channel_create(void *ctx,
-                           FFICallBack callback,
-                           void *userData,
-                           const char *channelId,
-                           const char *contentTopic,
-                           const char *senderId);
-
-  // Check whether a reliable channel is currently open. Returns "true" or
-  // "false"; an unknown channel id is not an error.
-  int logosdelivery_channel_exists(void *ctx,
-                           FFICallBack callback,
-                           void *userData,
-                           const char *channelId);
-
-  // Send a message on a reliable channel.
-  // messageJson: { "payload": "base64-encoded-payload", "ephemeral": false }
-  // Returns a request ID that can be used to track delivery.
-  int logosdelivery_channel_send(void *ctx,
-                         FFICallBack callback,
-                         void *userData,
-                         const char *channelId,
-                         const char *messageJson);
-
-  // Close a reliable channel: stops its SDS loops; persisted state survives, so
-  // re-creating the channel restores it.
-  int logosdelivery_channel_close(void *ctx,
-                          FFICallBack callback,
-                          void *userData,
-                          const char *channelId);
-
-  // Channel lifecycle events use per-event listeners: "onChannelMessageReceived"
-  // (payload base64-encoded), "onChannelMessageSent", "onChannelMessageError".
-
-  // Registers a callback for one named event. Returns a non-zero listener id
-  // on success, or zero for an invalid context or callback.
-  uint64_t logosdelivery_add_event_listener(void *ctx,
-                                 const char *eventName,
-                                 FFICallBack callback,
-                                 void *userData);
-
-  // Removes a previously registered event listener. Returns RET_OK on success.
-  int logosdelivery_remove_event_listener(void *ctx,
-                                 uint64_t listenerId);
-
-  // Retrieves the list of available node info IDs.
-  int logosdelivery_get_available_node_info_ids(void *ctx,
-                                 FFICallBack callback,
-                                 void *userData);
-
-  // Given a node info ID, retrieves the corresponding info.
-  int logosdelivery_get_node_info(void *ctx,
-                                  FFICallBack callback,
-                                  void *userData,
-                                  const char *nodeInfoId);
-
-  // Retrieves the list of available configurations.
-  int logosdelivery_get_available_configs(void *ctx,
-                                    FFICallBack callback,
-                                    void *userData);
-
-  // NOTE: the low-level kernel API (waku_*) lives in the separate, advanced
-  // header liblogosdelivery_kernel.h. It is intentionally not declared here so
-  // this header only promises the stable Messaging / Reliable Channels surface.
+uint64_t logosdelivery_add_event_listener(void* ctx,
+                                          const char* eventName,
+                                          FFICallBack callback,
+                                          void* userData);
+int logosdelivery_remove_event_listener(void* ctx, uint64_t listenerId);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* LOGOS_DELIVERY_TEST_STUB_H */
+#endif
