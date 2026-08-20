@@ -1013,7 +1013,7 @@ LOGOS_TEST(nodeAction_sanitizes_start_callback_failure) {
     delete impl;
 }
 
-LOGOS_TEST(nodeAction_start_converts_malformed_success_cbor_to_safe_failure) {
+LOGOS_TEST(nodeAction_start_accepts_direct_scalar_success) {
     auto t = LogosTestContext("delivery_module");
     auto* impl = createInitializedImpl(t);
     delivery_test_events::resetNodeLifecycleEvents();
@@ -1021,21 +1021,18 @@ LOGOS_TEST(nodeAction_start_converts_malformed_success_cbor_to_safe_failure) {
 
     mock_delivery_hold_next_start();
     const json acknowledgement = json::parse(impl->nodeAction(
-        lifecycleCommand("delivery-start-malformed-cbor", "start").dump()));
+        lifecycleCommand("delivery-start-direct-response", "start").dump()));
     LOGOS_ASSERT_TRUE(acknowledgement.at("accepted").get<bool>());
 
-    const std::uint8_t malformedResponse[] = {0x61};
-    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_start_raw(
-        RET_OK, reinterpret_cast<const char*>(malformedResponse), sizeof(malformedResponse)));
+    LOGOS_ASSERT_TRUE(mock_delivery_complete_held_start(RET_OK, "started"));
 
     const json status = lifecycleSnapshot(*impl);
-    LOGOS_ASSERT_EQ(status.at("state").get<std::string>(), std::string("stopped"));
-    LOGOS_ASSERT_EQ(status.at("last_error").at("code").get<std::string>(),
-                    std::string("start_failed"));
+    LOGOS_ASSERT_EQ(status.at("state").get<std::string>(), std::string("running"));
+    LOGOS_ASSERT_TRUE(status.at("last_error").is_null());
     LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.fired);
-    LOGOS_ASSERT_FALSE(delivery_test_events::g_lastNodeStarted.success);
+    LOGOS_ASSERT_TRUE(delivery_test_events::g_lastNodeStarted.success);
     LOGOS_ASSERT_EQ(delivery_test_events::g_lastNodeStarted.message,
-                    std::string("Delivery start failed."));
+                    std::string("started"));
 
     mock_delivery_reset_held_callbacks();
     delete impl;
@@ -1221,17 +1218,16 @@ LOGOS_TEST(storeQuery_returns_store_response_json) {
     delete impl;
 }
 
-LOGOS_TEST(storeQuery_decodes_cbor_text_response_bytes) {
+LOGOS_TEST(storeQuery_returns_direct_response_bytes) {
     auto t = LogosTestContext("delivery_module");
     auto* impl = createInitializedImpl(t);
     const std::string response =
-        R"({"requestId":"query-cbor","statusCode":200,"statusDesc":"OK","messages":[]})";
-    const std::vector<std::uint8_t> cborResponse = json::to_cbor(json(response));
+        R"({"requestId":"query-direct","statusCode":200,"statusDesc":"OK","messages":[]})";
     mock_delivery_set_raw_store_query_response(
-        reinterpret_cast<const char*>(cborResponse.data()), cborResponse.size());
+        response.data(), response.size());
 
     const StdLogosResult result = impl->storeQuery(
-        R"({"requestId":"query-cbor","includeData":true,"paginationForward":true})",
+        R"({"requestId":"query-direct","includeData":true,"paginationForward":true})",
         "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc",
         5000);
     mock_delivery_clear_raw_store_query_response();
@@ -1243,21 +1239,19 @@ LOGOS_TEST(storeQuery_decodes_cbor_text_response_bytes) {
     delete impl;
 }
 
-LOGOS_TEST(storeQuery_rejects_malformed_cbor_text_response_bytes) {
+LOGOS_TEST(storeQuery_returns_empty_direct_response) {
     auto t = LogosTestContext("delivery_module");
     auto* impl = createInitializedImpl(t);
-    const std::uint8_t malformedResponse[] = {0x61};
-    mock_delivery_set_raw_store_query_response(
-        reinterpret_cast<const char*>(malformedResponse), sizeof(malformedResponse));
+    mock_delivery_set_raw_store_query_response(nullptr, 0);
 
     const StdLogosResult result = impl->storeQuery(
-        R"({"requestId":"query-malformed","includeData":true,"paginationForward":true})",
+        R"({"requestId":"query-empty","includeData":true,"paginationForward":true})",
         "/ip4/127.0.0.1/tcp/8645/p2p/16Uuu2HBmAcHvhLqQKwSSbX6BG5JLWUDRcaLVrehUVqpw7fz1hbYc",
         5000);
     mock_delivery_clear_raw_store_query_response();
 
-    LOGOS_ASSERT_FALSE(result.success);
-    LOGOS_ASSERT_CONTAINS(result.error, "invalid CBOR text response");
+    LOGOS_ASSERT_TRUE(result.success);
+    LOGOS_ASSERT_EQ(result.value.get<std::string>(), std::string());
     LOGOS_ASSERT(t.cFunctionCalled("waku_store_query"));
 
     delete impl;

@@ -15,12 +15,15 @@
 //   t.mockCFunction("logosdelivery_start_node").returns(1);  // dispatch fails
 
 #include <logos_clib_mock.h>
+extern "C" {
+#include <liblogosdelivery.h>
+}
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -30,13 +33,31 @@
 #define RET_ERR 1
 #define RET_STALE_WARN 3
 
-typedef void (*logosdelivery_callback)(int callerRet, const char* msg, size_t len, void* userData);
+using DeliveryReplyCallback = void (*)(int callerRet,
+                                       const char* reply,
+                                       const char* errorMessage,
+                                       void* userData);
+using logosdelivery_callback = FFICallBack;
 
 // Sentinel address used as a fake non-null delivery context.
 static char s_fakeCtx = 0;
 
+static LogosDeliveryCtx* makeFakeContext()
+{
+    auto* context = static_cast<LogosDeliveryCtx*>(std::malloc(sizeof(LogosDeliveryCtx)));
+    if (context) {
+        context->ptr = &s_fakeCtx;
+    }
+    return context;
+}
+
 struct DeferredLifecycleCallback {
-    logosdelivery_callback callback = nullptr;
+    LogosDeliveryScalarRawFn callback = nullptr;
+    void* userData = nullptr;
+};
+
+struct DeferredCreateCallback {
+    LogosDeliveryCreateFn callback = nullptr;
     void* userData = nullptr;
 };
 
@@ -47,15 +68,17 @@ struct EventListener {
 };
 
 std::mutex deferredLifecycleCallbackMutex;
-std::optional<DeferredLifecycleCallback> deferredCreateCallback;
+std::optional<DeferredCreateCallback> deferredCreateCallback;
 std::optional<DeferredLifecycleCallback> deferredStartCallback;
 std::optional<DeferredLifecycleCallback> deferredStopCallback;
-std::optional<DeferredLifecycleCallback> deferredDestroyCallback;
 bool holdNextCreateCallback = false;
 bool holdNextStartCallback = false;
 bool holdNextStopCallback = false;
 bool holdNextDestroyCallback = false;
 bool failNextDestroyCallback = false;
+std::condition_variable destroyCallbackChanged;
+bool destroyCallbackHeld = false;
+bool releaseHeldDestroyCallback = false;
 std::mutex rawStoreQueryResponseMutex;
 std::optional<std::string> rawStoreQueryResponse;
 std::mutex eventListenerMutex;
@@ -78,36 +101,36 @@ static bool isTerminalLifecycleCallbackResult(int callbackResult)
     return callbackResult == RET_OK || callbackResult == RET_ERR;
 }
 
-static std::string encodeCborTextPayload(const char* message, std::size_t length)
-{
-    const std::string text = message ? std::string(message, length) : std::string();
-    const std::vector<std::uint8_t> encoded = nlohmann::json::to_cbor(nlohmann::json(text));
-    return std::string(reinterpret_cast<const char*>(encoded.data()), encoded.size());
-}
-
-static void invokeCallbackResult(int callbackResult,
-                                 logosdelivery_callback cb,
-                                 void* userData,
-                                 const char* message,
-                                 std::size_t length,
-                                 bool encodeOkPayload = true)
+static void invokeReplyResult(int callbackResult,
+                              DeliveryReplyCallback cb,
+                              void* userData,
+                              const char* reply,
+                              const char* errorMessage)
 {
     if (!cb) return;
+    cb(callbackResult,
+       callbackResult == RET_OK ? (reply ? reply : "") : nullptr,
+       callbackResult == RET_OK ? nullptr : (errorMessage ? errorMessage : "mock failure"),
+       userData);
+}
 
-    if (callbackResult == RET_OK && encodeOkPayload) {
-        const std::string encoded = encodeCborTextPayload(message, length);
-        cb(callbackResult, encoded.data(), encoded.size(), userData);
-        return;
-    }
-
-    cb(callbackResult, message ? message : "", message ? length : 0, userData);
+static void invokeScalarResult(int callbackResult,
+                               LogosDeliveryScalarRawFn cb,
+                               void* userData,
+                               const char* message)
+{
+    if (!cb) return;
+    std::string payload = message ? message : "";
+    cb(callbackResult,
+       payload.empty() ? nullptr : payload.data(),
+       payload.size(),
+       userData);
 }
 
 static bool completeHeldLifecycleCallback(std::optional<DeferredLifecycleCallback>& held,
                                           int callbackResult,
                                           const char* message,
-                                          std::size_t length,
-                                          bool encodeOkPayload = true)
+                                          std::size_t length)
 {
     DeferredLifecycleCallback deferred;
     {
@@ -120,15 +143,18 @@ static bool completeHeldLifecycleCallback(std::optional<DeferredLifecycleCallbac
     }
     if (!deferred.callback) return false;
 
-    invokeCallbackResult(callbackResult, deferred.callback, deferred.userData,
-                         message, length, encodeOkPayload);
+    std::string payload = message ? std::string(message, length) : std::string();
+    deferred.callback(callbackResult,
+                      payload.empty() ? nullptr : payload.data(),
+                      payload.size(),
+                      deferred.userData);
     return true;
 }
 
 // Helper: invoke callback with RET_OK and the string configured in the mock store.
-static void invokeOk(const char* funcName, logosdelivery_callback cb, void* userData) {
+static void invokeOk(const char* funcName, DeliveryReplyCallback cb, void* userData) {
     const char* msg = LogosCMockStore::instance().getReturnString(funcName);
-    invokeCallbackResult(RET_OK, cb, userData, msg ? msg : "", msg ? std::strlen(msg) : 0);
+    invokeReplyResult(RET_OK, cb, userData, msg, nullptr);
 }
 
 static const char* eventNameForPayload(const std::string& eventJson) {
@@ -159,25 +185,47 @@ static const char* eventNameForPayload(const std::string& eventJson) {
 
 extern "C" {
 
-void* logosdelivery_create_node(const char* cfg, logosdelivery_callback cb, void* userData) {
+void* logosdelivery_create_node(const LogosdeliveryCreateNodeCtorReq* req,
+                                LogosDeliveryCreateRawFn cb,
+                                void* userData) {
     LOGOS_CMOCK_RECORD("logosdelivery_create_node");
     {
         std::lock_guard<std::mutex> lock(eventListenerMutex);
-        lastCreateConfig = cfg ? cfg : "";
+        lastCreateConfig = req && req->configJson ? req->configJson : "";
     }
     int ok = LOGOS_CMOCK_RETURN(int, "logosdelivery_create_node");
     if (ok && cb) {
-        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
-        if (holdNextCreateCallback) {
-            holdNextCreateCallback = false;
-            deferredCreateCallback = DeferredLifecycleCallback{cb, userData};
-        } else {
-            cb(RET_OK, "", 0, userData);
-        }
+        cb(RET_OK, "1", nullptr, userData);
     } else if (!ok && cb) {
-        cb(RET_ERR, "mock: create_node fail", 22, userData);
+        cb(RET_ERR, nullptr, "mock: create_node fail", userData);
     }
     return ok ? static_cast<void*>(&s_fakeCtx) : nullptr;
+}
+
+int logosdelivery_ctx_create(const char* configJson,
+                             LogosDeliveryCreateFn cb,
+                             void* userData) {
+    LOGOS_CMOCK_RECORD("logosdelivery_create_node");
+    {
+        std::lock_guard<std::mutex> lock(eventListenerMutex);
+        lastCreateConfig = configJson ? configJson : "";
+    }
+
+    const bool createSucceeded =
+        LOGOS_CMOCK_RETURN(int, "logosdelivery_create_node") != 0;
+    if (!cb) return RET_OK;
+
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    if (holdNextCreateCallback) {
+        holdNextCreateCallback = false;
+        deferredCreateCallback = DeferredCreateCallback{cb, userData};
+    } else {
+        cb(createSucceeded ? RET_OK : RET_ERR,
+           createSucceeded ? makeFakeContext() : nullptr,
+           createSucceeded ? nullptr : "mock: create_node fail",
+           userData);
+    }
+    return RET_OK;
 }
 
 std::uint64_t logosdelivery_add_event_listener(
@@ -211,32 +259,38 @@ int logosdelivery_remove_event_listener(void* ctx, std::uint64_t listenerId) {
     return eventListeners.erase(listenerId) == 1 ? RET_OK : RET_ERR;
 }
 
-int logosdelivery_destroy(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
+int logosdelivery_destroy(void* /*ctx*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_destroy");
     int dispatch = LOGOS_CMOCK_RETURN(int, "logosdelivery_destroy");
-    if (dispatch == RET_OK) {
-        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    if (dispatch != RET_OK) {
+        return dispatch;
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(deferredLifecycleCallbackMutex);
         if (holdNextDestroyCallback) {
             holdNextDestroyCallback = false;
-            deferredDestroyCallback = DeferredLifecycleCallback{cb, userData};
-        } else if (failNextDestroyCallback) {
+            destroyCallbackHeld = true;
+            destroyCallbackChanged.notify_all();
+            destroyCallbackChanged.wait(lock, [] {
+                return releaseHeldDestroyCallback;
+            });
+            destroyCallbackHeld = false;
+            releaseHeldDestroyCallback = false;
+        }
+        if (failNextDestroyCallback) {
             failNextDestroyCallback = false;
-            const char* message = "mock: destroy callback fail";
-            if (cb) {
-                cb(RET_ERR, message, std::strlen(message), userData);
-            }
             return RET_ERR;
-        } else {
-            invokeOk("logosdelivery_destroy", cb, userData);
-            std::lock_guard<std::mutex> eventLock(eventListenerMutex);
-            eventListeners.clear();
-            nextEventListenerId = 1;
         }
     }
-    return dispatch;
+
+    std::lock_guard<std::mutex> eventLock(eventListenerMutex);
+    eventListeners.clear();
+    nextEventListenerId = 1;
+    return RET_OK;
 }
 
-int logosdelivery_start_node(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
+int logosdelivery_start_node(void* /*ctx*/, LogosDeliveryScalarRawFn cb, void* userData) {
     LOGOS_CMOCK_RECORD("logosdelivery_start_node");
     // Return value is the dispatch code (default 0 = RET_OK). Only fire the
     // completion callback when dispatch "succeeds", mirroring the real FFI.
@@ -247,13 +301,15 @@ int logosdelivery_start_node(void* /*ctx*/, logosdelivery_callback cb, void* use
             holdNextStartCallback = false;
             deferredStartCallback = DeferredLifecycleCallback{cb, userData};
         } else {
-            invokeOk("logosdelivery_start_node", cb, userData);
+            const char* message = LogosCMockStore::instance().getReturnString(
+                "logosdelivery_start_node");
+            invokeScalarResult(RET_OK, cb, userData, message);
         }
     }
     return dispatch;
 }
 
-int logosdelivery_stop_node(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
+int logosdelivery_stop_node(void* /*ctx*/, LogosDeliveryScalarRawFn cb, void* userData) {
     LOGOS_CMOCK_RECORD("logosdelivery_stop_node");
     int dispatch = LOGOS_CMOCK_RETURN(int, "logosdelivery_stop_node");
     if (dispatch == RET_OK) {
@@ -262,32 +318,45 @@ int logosdelivery_stop_node(void* /*ctx*/, logosdelivery_callback cb, void* user
             holdNextStopCallback = false;
             deferredStopCallback = DeferredLifecycleCallback{cb, userData};
         } else {
-            invokeOk("logosdelivery_stop_node", cb, userData);
+            const char* message = LogosCMockStore::instance().getReturnString(
+                "logosdelivery_stop_node");
+            invokeScalarResult(RET_OK, cb, userData, message);
         }
     }
     return dispatch;
 }
 
-int logosdelivery_send(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*msg*/) {
+int logosdelivery_send(void* /*ctx*/,
+                       LogosdeliverySendReplyFn cb,
+                       void* userData,
+                       const LogosdeliverySendReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_send");
     invokeOk("logosdelivery_send", cb, userData);
     return RET_OK;
 }
 
-int logosdelivery_subscribe(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*topic*/) {
+int logosdelivery_subscribe(void* /*ctx*/,
+                            LogosdeliverySubscribeReplyFn cb,
+                            void* userData,
+                            const LogosdeliverySubscribeReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_subscribe");
     invokeOk("logosdelivery_subscribe", cb, userData);
     return RET_OK;
 }
 
-int logosdelivery_unsubscribe(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*topic*/) {
+int logosdelivery_unsubscribe(void* /*ctx*/,
+                              LogosdeliveryUnsubscribeReplyFn cb,
+                              void* userData,
+                              const LogosdeliveryUnsubscribeReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_unsubscribe");
     invokeOk("logosdelivery_unsubscribe", cb, userData);
     return RET_OK;
 }
 
-int waku_store_query(void* /*ctx*/, logosdelivery_callback cb, void* userData,
-                     const char* /*jsonQuery*/, const char* /*peerAddr*/, int /*timeoutMs*/) {
+int waku_store_query(void* /*ctx*/,
+                     WakuStoreQueryReplyFn cb,
+                     void* userData,
+                     const WakuStoreQueryReq* /*req*/) {
     LOGOS_CMOCK_RECORD("waku_store_query");
     int dispatch = LOGOS_CMOCK_RETURN(int, "waku_store_query_dispatch");
     if (dispatch == RET_OK) {
@@ -298,20 +367,24 @@ int waku_store_query(void* /*ctx*/, logosdelivery_callback cb, void* userData,
             rawResponse = rawStoreQueryResponse;
         }
         if (rawResponse) {
-            invokeCallbackResult(callbackResult, cb, userData,
-                                 rawResponse->data(), rawResponse->size(), false);
+            invokeReplyResult(callbackResult, cb, userData,
+                              callbackResult == RET_OK ? rawResponse->c_str() : nullptr,
+                              callbackResult == RET_OK ? nullptr : rawResponse->c_str());
         } else {
             const char* response = LogosCMockStore::instance().getReturnString(
                 "waku_store_query");
-            invokeCallbackResult(callbackResult, cb, userData,
-                                 response ? response : "",
-                                 response ? std::strlen(response) : 0);
+            invokeReplyResult(callbackResult, cb, userData,
+                              callbackResult == RET_OK ? response : nullptr,
+                              callbackResult == RET_OK ? nullptr : response);
         }
     }
     return dispatch;
 }
 
-int waku_get_connected_peers_info(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
+int waku_get_connected_peers_info(void* /*ctx*/,
+                                  WakuGetConnectedPeersInfoReplyFn cb,
+                                  void* userData,
+                                  const WakuGetConnectedPeersInfoReq* /*req*/) {
     LOGOS_CMOCK_RECORD("waku_get_connected_peers_info");
     int dispatch = LOGOS_CMOCK_RETURN(int, "waku_get_connected_peers_info_dispatch");
     if (dispatch == RET_OK) {
@@ -319,52 +392,73 @@ int waku_get_connected_peers_info(void* /*ctx*/, logosdelivery_callback cb, void
             int, "waku_get_connected_peers_info_callback_result");
         const char* response = LogosCMockStore::instance().getReturnString(
             "waku_get_connected_peers_info");
-        invokeCallbackResult(callbackResult, cb, userData,
-                             response ? response : "",
-                             response ? std::strlen(response) : 0);
+        invokeReplyResult(callbackResult, cb, userData,
+                          callbackResult == RET_OK ? response : nullptr,
+                          callbackResult == RET_OK ? nullptr : response);
     }
     return dispatch;
 }
 
-int logosdelivery_channel_create(void* /*ctx*/, logosdelivery_callback cb, void* userData,
-                                 const char* /*channelId*/, const char* /*contentTopic*/, const char* /*senderId*/) {
+int logosdelivery_channel_create(void* /*ctx*/,
+                                 LogosdeliveryChannelCreateReplyFn cb,
+                                 void* userData,
+                                 const LogosdeliveryChannelCreateReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_channel_create");
     invokeOk("logosdelivery_channel_create", cb, userData);
     return RET_OK;
 }
 
-int logosdelivery_channel_exists(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*channelId*/) {
+int logosdelivery_channel_exists(void* /*ctx*/,
+                                 LogosdeliveryChannelExistsReplyFn cb,
+                                 void* userData,
+                                 const LogosdeliveryChannelExistsReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_channel_exists");
     invokeOk("logosdelivery_channel_exists", cb, userData);
     return RET_OK;
 }
 
-int logosdelivery_channel_send(void* /*ctx*/, logosdelivery_callback cb, void* userData,
-                               const char* /*channelId*/, const char* /*msg*/) {
+int logosdelivery_channel_send(void* /*ctx*/,
+                               LogosdeliveryChannelSendReplyFn cb,
+                               void* userData,
+                               const LogosdeliveryChannelSendReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_channel_send");
     invokeOk("logosdelivery_channel_send", cb, userData);
     return RET_OK;
 }
 
-int logosdelivery_channel_close(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*channelId*/) {
+int logosdelivery_channel_close(void* /*ctx*/,
+                                LogosdeliveryChannelCloseReplyFn cb,
+                                void* userData,
+                                const LogosdeliveryChannelCloseReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_channel_close");
     invokeOk("logosdelivery_channel_close", cb, userData);
     return RET_OK;
 }
 
-int logosdelivery_get_node_info(void* /*ctx*/, logosdelivery_callback cb, void* userData, const char* /*attributeName*/) {
+int logosdelivery_get_node_info(void* /*ctx*/,
+                                LogosdeliveryGetNodeInfoReplyFn cb,
+                                void* userData,
+                                const LogosdeliveryGetNodeInfoReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_get_node_info");
     invokeOk("logosdelivery_get_node_info", cb, userData);
     return RET_OK;
 }
 
-int logosdelivery_get_available_node_info_ids(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
+int logosdelivery_get_available_node_info_ids(
+    void* /*ctx*/,
+    LogosdeliveryGetAvailableNodeInfoIdsReplyFn cb,
+    void* userData,
+    const LogosdeliveryGetAvailableNodeInfoIdsReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_get_available_node_info_ids");
     invokeOk("logosdelivery_get_available_node_info_ids", cb, userData);
     return RET_OK;
 }
 
-int logosdelivery_get_available_configs(void* /*ctx*/, logosdelivery_callback cb, void* userData) {
+int logosdelivery_get_available_configs(
+    void* /*ctx*/,
+    LogosdeliveryGetAvailableConfigsReplyFn cb,
+    void* userData,
+    const LogosdeliveryGetAvailableConfigsReq* /*req*/) {
     LOGOS_CMOCK_RECORD("logosdelivery_get_available_configs");
     invokeOk("logosdelivery_get_available_configs", cb, userData);
     return RET_OK;
@@ -416,20 +510,34 @@ extern "C" bool mock_delivery_complete_held_stop(int callbackResult, const char*
 
 extern "C" bool mock_delivery_complete_held_create(int callbackResult, const char* message)
 {
-    return completeHeldLifecycleCallback(
-        deferredCreateCallback, callbackResult, message, message ? std::strlen(message) : 0);
+    DeferredCreateCallback deferred;
+    {
+        std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+        if (!deferredCreateCallback) return false;
+        deferred = *deferredCreateCallback;
+        if (isTerminalLifecycleCallbackResult(callbackResult)) {
+            deferredCreateCallback.reset();
+        }
+    }
+    if (!deferred.callback) return false;
+
+    deferred.callback(callbackResult,
+                      callbackResult == RET_OK ? makeFakeContext() : nullptr,
+                      callbackResult == RET_OK ? nullptr : (message ? message : "mock create failure"),
+                      deferred.userData);
+    return true;
 }
 
 extern "C" bool mock_delivery_complete_held_destroy(int callbackResult, const char* message)
 {
-    const bool completed = completeHeldLifecycleCallback(
-        deferredDestroyCallback, callbackResult, message, message ? std::strlen(message) : 0);
-    if (!completed) return false;
-    if (callbackResult == RET_OK) {
-        std::lock_guard<std::mutex> lock(eventListenerMutex);
-        eventListeners.clear();
-        nextEventListenerId = 1;
+    (void)message;
+    std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
+    if (!destroyCallbackHeld) return false;
+    if (callbackResult != RET_OK) {
+        failNextDestroyCallback = true;
     }
+    releaseHeldDestroyCallback = true;
+    destroyCallbackChanged.notify_all();
     return true;
 }
 
@@ -438,7 +546,7 @@ extern "C" bool mock_delivery_complete_held_start_raw(int callbackResult,
                                                         std::size_t payloadSize)
 {
     return completeHeldLifecycleCallback(
-        deferredStartCallback, callbackResult, payload, payloadSize, false);
+        deferredStartCallback, callbackResult, payload, payloadSize);
 }
 
 extern "C" bool mock_delivery_has_held_start()
@@ -462,7 +570,7 @@ extern "C" bool mock_delivery_has_held_create()
 extern "C" bool mock_delivery_has_held_destroy()
 {
     std::lock_guard<std::mutex> lock(deferredLifecycleCallbackMutex);
-    return deferredDestroyCallback.has_value();
+    return destroyCallbackHeld;
 }
 
 extern "C" void mock_delivery_reset_held_callbacks()
@@ -471,7 +579,12 @@ extern "C" void mock_delivery_reset_held_callbacks()
     deferredCreateCallback.reset();
     deferredStartCallback.reset();
     deferredStopCallback.reset();
-    deferredDestroyCallback.reset();
+    if (destroyCallbackHeld) {
+        releaseHeldDestroyCallback = true;
+        destroyCallbackChanged.notify_all();
+    } else {
+        releaseHeldDestroyCallback = false;
+    }
     holdNextCreateCallback = false;
     holdNextStartCallback = false;
     holdNextStopCallback = false;

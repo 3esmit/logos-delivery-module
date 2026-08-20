@@ -1,18 +1,16 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <memory>
 #include <mutex>
-#include <optional>
+#include <new>
 #include <semaphore>
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 #include <logos_result.h>
-#include <nlohmann/json.hpp>
 
 extern "C" {
 #include <liblogosdelivery.h>
@@ -26,25 +24,119 @@ struct CallbackPayload {
     std::string message;
 };
 
-std::optional<std::string> decodeCborTextResponse(const std::string& payload)
-{
-    if (payload.empty()) {
-        return std::string{};
-    }
+struct CAbiCallbackBridge {
+    DeliveryCallback callback;
+    void* userData;
+    std::atomic<unsigned int> references{2};
+    std::atomic<bool> callbackInvoked{false};
 
-    const std::vector<std::uint8_t> bytes(payload.begin(), payload.end());
-    const auto decoded = nlohmann::json::from_cbor(bytes, true, false);
-    if (decoded.is_discarded() || !decoded.is_string()) {
-        return std::nullopt;
+    CAbiCallbackBridge(DeliveryCallback callback_, void* userData_)
+        : callback(callback_), userData(userData_)
+    {
     }
-    return decoded.get<std::string>();
+};
+
+void releaseCAbiCallbackBridge(CAbiCallbackBridge* bridge)
+{
+    if (bridge && bridge->references.fetch_sub(1) == 1) {
+        delete bridge;
+    }
 }
 
-template <typename Func, typename... BoundArgs>
-auto bindApiCall(Func func, void* callbackCtx, BoundArgs&&... boundArgs)
+void forwardCAbiReply(int callerRet,
+                      const char* reply,
+                      const char* errorMessage,
+                      void* userData)
 {
-    return [func, callbackCtx, ... args = std::forward<BoundArgs>(boundArgs)](DeliveryCallback callback, void* userData) {
-        return func(callbackCtx, callback, userData, args...);
+    auto* bridge = static_cast<CAbiCallbackBridge*>(userData);
+    if (!bridge || !bridge->callback) {
+        releaseCAbiCallbackBridge(bridge);
+        return;
+    }
+
+    bridge->callbackInvoked.store(true);
+    const char* message = callerRet == RET_OK ? reply : errorMessage;
+    const std::size_t messageLength = message ? std::char_traits<char>::length(message) : 0;
+    bridge->callback(callerRet, message, messageLength, bridge->userData);
+
+    // RET_STALE_WARN is non-terminal and keeps the bridge alive for the final
+    // callback. The current C ABI uses RET_OK/RET_ERR for terminal replies.
+    if (callerRet != RET_STALE_WARN) {
+        releaseCAbiCallbackBridge(bridge);
+    }
+}
+
+void forwardScalarReply(int callerRet, char* reply, size_t len, void* userData)
+{
+    auto* bridge = static_cast<CAbiCallbackBridge*>(userData);
+    if (!bridge || !bridge->callback) {
+        releaseCAbiCallbackBridge(bridge);
+        return;
+    }
+
+    bridge->callbackInvoked.store(true);
+    bridge->callback(callerRet, reply, len, bridge->userData);
+    if (callerRet != RET_STALE_WARN) {
+        releaseCAbiCallbackBridge(bridge);
+    }
+}
+
+template <typename ReplyFn, typename Request, typename... BoundArgs>
+auto bindApiCall(int (*func)(void*, ReplyFn, void*, const Request*),
+                 void* callbackCtx,
+                 BoundArgs&&... boundArgs)
+{
+    return [func, callbackCtx, ... args = std::forward<BoundArgs>(boundArgs)](
+               DeliveryCallback callback, void* userData) {
+        auto* bridge = new (std::nothrow) CAbiCallbackBridge(callback, userData);
+        if (!bridge) {
+            callback(RET_ERR, "out of memory", sizeof("out of memory") - 1, userData);
+            return RET_ERR;
+        }
+
+        Request request{args...};
+        const int dispatchResult = func(callbackCtx,
+                                        forwardCAbiReply,
+                                        bridge,
+                                        &request);
+        const bool callbackInvoked = bridge->callbackInvoked.load();
+        releaseCAbiCallbackBridge(bridge);
+        if (dispatchResult != RET_OK) {
+            if (!callbackInvoked) {
+                releaseCAbiCallbackBridge(bridge);
+            }
+        }
+        return dispatchResult;
+    };
+}
+
+template <typename ScalarFn>
+auto bindApiCall(int (*func)(void*, ScalarFn, void*), void* callbackCtx)
+{
+    return [func, callbackCtx](DeliveryCallback callback, void* userData) {
+        auto* bridge = new (std::nothrow) CAbiCallbackBridge(callback, userData);
+        if (!bridge) {
+            callback(RET_ERR, "out of memory", sizeof("out of memory") - 1, userData);
+            return RET_ERR;
+        }
+
+        const int dispatchResult = func(callbackCtx, forwardScalarReply, bridge);
+        const bool callbackInvoked = bridge->callbackInvoked.load();
+        releaseCAbiCallbackBridge(bridge);
+        if (dispatchResult != RET_OK) {
+            if (!callbackInvoked) {
+                releaseCAbiCallbackBridge(bridge);
+            }
+        }
+        return dispatchResult;
+    };
+}
+
+template <typename Context>
+auto bindApiCall(int (*func)(Context*), void* callbackCtx)
+{
+    return [func, callbackCtx](DeliveryCallback, void*) {
+        return func(static_cast<Context*>(callbackCtx));
     };
 }
 
@@ -178,10 +270,6 @@ StdLogosResult callApiRetValue(
         return {false, {}, message};
     }
 
-    const auto decodedResponse = decodeCborTextResponse(callbackCtx->payload.message);
-    if (!decodedResponse) {
-        return {false, {}, operationName + " returned an invalid CBOR text response"};
-    }
-    return {true, *decodedResponse};
+    return {true, callbackCtx->payload.message};
 }
 } // namespace
