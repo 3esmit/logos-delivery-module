@@ -23,9 +23,9 @@ cd "$(dirname "$0")"
 read -r -a DOCTEST <<< "${DOCTEST:-nix run github:logos-co/logos-doctest --}"
 OUTPUT_DIR="./outputs"
 
-# The runtime spec downloads delivery_module from the Logos catalog (via lgpd),
-# not by compiling this checkout. Use the logos-co binary cache for the lighter
-# logoscore/lgpm/lgpd builds. Skip with SKIP_CACHIX=1.
+# The runtime spec packages this maintained fork at the selected commit. Use the
+# logos-co binary cache for the lighter logoscore/lgpm/lgpd builds. Skip with
+# SKIP_CACHIX=1.
 if [ "${SKIP_CACHIX:-0}" != "1" ]; then
   echo "==> Enabling logos-co binary cache (set SKIP_CACHIX=1 to skip)"
   if command -v cachix >/dev/null 2>&1; then
@@ -59,15 +59,19 @@ mkdir -p "${OUTPUT_DIR}"
 for spec in *.test.yaml; do
   name="$(basename "${spec%.test.yaml}")"
   echo "==> Running ${spec} into ${OUTPUT_DIR}/"
-  # ${RELEASE_FOR[@]+...} guards the expansion so an empty array doesn't trip
-  # `set -u` on older bash (e.g. macOS's stock 3.2).
+  # Pin the package URL to this checkout's commit unless the caller supplied a
+  # different ref (for example, a release tag).
+  release_ref="${RELEASE_FOR:-$(git -C .. rev-parse HEAD)}"
+  release_args=(--release-for "logos-delivery-module=${release_ref}")
   "${DOCTEST[@]}" run "${spec}" \
     --verbose \
     --continue-on-fail \
+    "${release_args[@]}" \
     --output-dir "${OUTPUT_DIR}/"
 
   echo "==> Generating ${OUTPUT_DIR}/${name}.md"
   "${DOCTEST[@]}" generate "${spec}" \
+    "${release_args[@]}" \
     -o "${OUTPUT_DIR}/${name}.md"
 done
 
