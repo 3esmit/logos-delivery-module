@@ -84,7 +84,7 @@ jobs:
           echo "path=$spec" >> "$GITHUB_OUTPUT"
 
       - name: Verify module builds from this commit
-        run: nix build .#lgx -L
+        run: nix build .#lgx-dev -L
 
       # The runner is the shared `doctest` CLI, invoked directly via its flake
       # (github:logos-co/logos-doctest). The flake bundles Python + PyYAML

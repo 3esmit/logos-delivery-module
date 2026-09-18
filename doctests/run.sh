@@ -35,12 +35,14 @@ if [ "${SKIP_CACHIX:-0}" != "1" ]; then
   fi
 fi
 
-# Optional: verify this checkout still builds as .lgx (slow; pulls logos-delivery).
+# Optional: verify this checkout still builds as the dev .lgx consumed by the
+# runtime test (slow; pulls logos-delivery). The public `#lgx` alias is the
+# portable distribution package in this maintained fork.
 # The doctest itself does not require this — CI runs it on every PR.
 if [ "${VERIFY_BUILD:-0}" = "1" ]; then
   REPO_ROOT="$(git -C .. rev-parse --show-toplevel)"
-  echo "==> VERIFY_BUILD=1: building path:${REPO_ROOT}#lgx"
-  nix build "path:${REPO_ROOT}#lgx" -L
+  echo "==> VERIFY_BUILD=1: building path:${REPO_ROOT}#lgx-dev"
+  nix build "path:${REPO_ROOT}#lgx-dev" -L
 fi
 
 echo "==> Clearing previous ${OUTPUT_DIR}/"

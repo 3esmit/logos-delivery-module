@@ -10,7 +10,7 @@ delivery-module commit end-to-end through the headless `logoscore` runtime:
    so building it brings in the whole module-runtime stack (`logos_host`,
    `liblogos_core`, the IPC layer).
 2. Build **this** delivery module as an installable `.lgx` package straight from
-   its own flake's `#lgx` output, **pinned to the commit under test** — so the
+   its own flake's `#lgx-dev` output, **pinned to the commit under test** — so the
    module you run is built from exactly what is checked out here, not the latest
    published release.
 3. Install the `.lgx` into a `./modules` directory with `lgpm`.
@@ -27,7 +27,7 @@ keeps the delivery module loadable and callable.
 **What you'll learn:**
 
 - How to build the `logoscore` runtime and the `lgpm` package manager from their flakes
-- How a module's flake exposes a ready-to-install `.lgx` via its `#lgx` output
+- How a module's flake exposes a ready-to-install `.lgx` via its `#lgx-dev` output
 - How to install an `.lgx` into a modules directory with `lgpm`
 - How to start the `logoscore` daemon, load a module, introspect it, and call its methods
 - How to create and start a delivery node with `createNode` and `start`
@@ -85,11 +85,13 @@ The executable is at `./lgpm/bin/lgpm`.
 
 ## Step 3: Build and install this delivery module
 
-Build **this** delivery module's `.lgx` straight from its flake's `#lgx`
+Build **this** delivery module's `.lgx` straight from its flake's `#lgx-dev`
 output and install it into a local `./modules` directory with `lgpm`. Every
 module built with
 [`logos-module-builder`](https://github.com/logos-co/logos-module-builder)
-exposes a ready-to-install `#lgx`.
+exposes a ready-to-install `#lgx-dev`. This maintained fork keeps `#lgx`
+mapped to the portable package for distribution, while the dev `lgpm`
+binary used below selects the `-dev` package variant.
 
 > The `` in the URL is what pins the build to a specific commit: the
 > doc-test runner expands it to a concrete ref. Locally that is this
@@ -98,13 +100,13 @@ exposes a ready-to-install `#lgx`.
 
 ### 3.1 Build the module's .lgx
 
-Build the `#lgx` output and link it as `./delivery-lgx`. (This compiles
+Build the `#lgx-dev` output and link it as `./delivery-lgx`. (This compiles
 the module and its SDK dependencies through Nix, so the first build is
 slow.)
 
 ```bash
-# From inside the clone this is simply: nix build '.#lgx'
-nix build 'github:3esmit/logos-delivery-module#lgx' -o delivery-lgx
+# From inside the clone this is simply: nix build '.#lgx-dev'
+nix build 'github:3esmit/logos-delivery-module#lgx-dev' -o delivery-lgx
 ```
 
 The `.lgx` package is now under `./delivery-lgx/`:
@@ -129,10 +131,20 @@ cp -RL ./logos/modules/. ./modules/
 
 Install the freshly-built package into `./modules`. `delivery_module` is
 a `core` module, so it goes to `--modules-dir`. The package is unsigned
-(a local dev build), so we pass `--allow-unsigned`.
+(a local dev build), so we pass `--allow-unsigned`. The package manager
+and LGX bundler use different historical spellings for x86_64; choose
+the producer spelling explicitly so Linux and macOS installs agree.
 
 ```bash
-./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file delivery-lgx/*.lgx
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) platform=linux-amd64 ;;
+  Linux:aarch64|Linux:arm64) platform=linux-arm64 ;;
+  Darwin:x86_64) platform=darwin-amd64 ;;
+  Darwin:arm64) platform=darwin-arm64 ;;
+  *) echo "Unsupported host: $(uname -s) $(uname -m)" >&2; exit 1 ;;
+esac
+./lgpm/bin/lgpm --platform "$platform" --modules-dir ./modules --allow-unsigned install --file delivery-lgx/*.lgx
+
 ```
 
 ### 3.4 Confirm the install
@@ -140,7 +152,15 @@ a `core` module, so it goes to `--modules-dir`. The package is unsigned
 Scan the directory and confirm the module landed:
 
 ```bash
-./lgpm/bin/lgpm --modules-dir ./modules list
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) platform=linux-amd64 ;;
+  Linux:aarch64|Linux:arm64) platform=linux-arm64 ;;
+  Darwin:x86_64) platform=darwin-amd64 ;;
+  Darwin:arm64) platform=darwin-arm64 ;;
+  *) echo "Unsupported host: $(uname -s) $(uname -m)" >&2; exit 1 ;;
+esac
+./lgpm/bin/lgpm --platform "$platform" --modules-dir ./modules list
+
 ```
 
 ---
