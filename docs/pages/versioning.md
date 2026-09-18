@@ -40,7 +40,7 @@ Example: `0.2.3` is the fourth release of the module targeting Logos Testnet 2.
 
 1. Update `"version"` in [`metadata.json`](../../metadata.json) and the runtime
    version reported by the module.
-2. Add an entry for the version to [`CHANGELOG.md`](../../CHANGELOG.md).
+2. Add an entry for the version to `CHANGELOG.md`.
 3. Open and merge the versioned change through the normal review process.
 4. From `master`, run the **Publish Delivery Module** workflow.
 
