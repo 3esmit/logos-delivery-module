@@ -104,7 +104,7 @@ slow.)
 
 ```bash
 # From inside the clone this is simply: nix build '.#lgx'
-nix build 'github:logos-co/logos-delivery-module#lgx' -o delivery-lgx
+nix build 'github:3esmit/logos-delivery-module#lgx' -o delivery-lgx
 ```
 
 The `.lgx` package is now under `./delivery-lgx/`:
