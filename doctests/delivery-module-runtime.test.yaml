@@ -97,10 +97,10 @@ sections:
           Build the `#lgx` output and link it as `./delivery-lgx`. (This compiles
           the module and its SDK dependencies through Nix, so the first build is
           slow.)
-        run: "nix build 'github:logos-co/logos-delivery-module{release}#lgx' -o delivery-lgx"
+        run: "nix build 'github:3esmit/logos-delivery-module{release}#lgx' -o delivery-lgx"
         code_block: |
           # From inside the clone this is simply: nix build '.#lgx'
-          nix build 'github:logos-co/logos-delivery-module{release}#lgx' -o delivery-lgx
+          nix build 'github:3esmit/logos-delivery-module{release}#lgx' -o delivery-lgx
         post_text: "The `.lgx` package is now under `./delivery-lgx/`:"
         extra_run:
           run: "ls delivery-lgx/*.lgx"
