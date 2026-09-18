@@ -307,6 +307,11 @@ public:
 
     std::string name() const { return "delivery_module"; }
 
+/**
+ * @defgroup events Events
+ * @brief Asynchronous observations emitted by the Delivery module.
+ * @{
+ */
 logos_events:
     /// Emits versioned managed-node lifecycle observations.
     void nodeChanged(const std::string& event);
@@ -323,6 +328,8 @@ logos_events:
 
     void nodeStarted(bool success, const std::string& message, int64_t timestamp);
     void nodeStopped(bool success, const std::string& message, int64_t timestamp);
+
+/** @} */
 
 private:
     enum class LifecycleState : std::uint8_t {

@@ -118,7 +118,13 @@ directly on the host.
 ### Build the runtime and module
 
 Build the `logoscore` CLI (the headless runtime) and the `lgpm` package
-manager from their flakes, then build and install this module's `.lgx`:
+manager from their flakes, then build and install this module's `.lgx` — plus
+the RLN modules it depends on. `delivery_module` declares `liblogos_rln_module`
+in `metadata.json#dependencies` and the host refuses to load a module whose
+dependency chain is missing, so `liblogos_rln_module`,
+`liblogos_lez_rln_module` and `lez_core` have to be installed alongside it.
+This flake re-exports their `.lgx`s from its own locked inputs, so they match
+the revs the module was built against:
 
 ```bash
 git clone https://github.com/logos-co/logos-delivery-module.git
@@ -131,10 +137,17 @@ nix build 'github:logos-co/logos-package-manager#cli' -o lgpm
 # This module, built from the current checkout
 nix build '.#lgx' -o delivery-lgx
 
+# Its RLN dependency chain
+nix build '.#liblogos_rln_module-lgx' -o rln-lgx
+nix build '.#liblogos_lez_rln_module-lgx' -o lez-rln-lgx
+nix build '.#lez_core-lgx' -o lez-core-lgx
+
 # Seed the modules dir with the bundled capability module, then install
 mkdir -p modules
 cp -RL ./logos/modules/. ./modules/
-./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file delivery-lgx/*.lgx
+for pkg in lez-core-lgx lez-rln-lgx rln-lgx delivery-lgx; do
+  ./lgpm/bin/lgpm --modules-dir ./modules --allow-unsigned install --file "$pkg"/*.lgx
+done
 ```
 
 The first build compiles the whole runtime stack through Nix — allow
@@ -172,14 +185,14 @@ logoscore stop
 
 > For a fully pinned, build-from-this-commit walkthrough — plus notes on the
 > blocking Kademlia bootstrap in headless runs — see the
-> [runtime doc-test](../doctests/outputs/delivery-module-runtime.md).
+> [runtime doc-test](https://github.com/logos-co/logos-delivery-module/blob/master/doctests/outputs/delivery-module-runtime.md).
 
 ## Configuration
 
 The config uses the layered `createNode` shape: `preset` picks the network,
 `mode` defaults to `"Core"` (`"Edge"` for a light node), per-layer settings
 go in `messagingOverrides`. The repo ships it as
-[`conf/logos-test.json`](../conf/logos-test.json): Docker mounts it into the
+[`conf/logos-test.json`](../../conf/logos-test.json): Docker mounts it into the
 container at `/conf` (`@/conf/logos-test.json`); with the Nix build, pass the
 path directly (`@conf/logos-test.json`). The prebuilt-binaries path above
 writes the same config inline. Edit it and re-run the boot steps to change
@@ -190,10 +203,11 @@ Keep extra keys inside `messagingOverrides` / `channelsOverrides` /
 legacy flat shape. Unpinned listening ports are OS-assigned; the config pins
 the p2p ports to match the Docker port mappings.
 
-For the dev network, use [`conf/logos-dev.json`](../conf/logos-dev.json)
-(preset `logos.dev`). The full config grammar, including kernel-only nodes
+For the dev network, use [`conf/logos-dev.json`](../../conf/logos-dev.json)
+(preset `logos.dev`) — see [`networks.md`](./networks.md) for how the two
+differ. The full config grammar, including kernel-only nodes
 (`"entryLayer": "kernel"`), is documented in the
-[README](../README.md#node-configuration-createnode).
+[API reference](api_reference.rst).
 
 The node is now connected to the `logos.test` network. See
 [`query-node.md`](./query-node.md) to read its peer ID, ENR, and metrics.
